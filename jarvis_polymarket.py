@@ -2,12 +2,18 @@
 jarvis_polymarket.py
 --------------------
 Fetches trending Polymarket markets and uses Claude to generate
-an analysis report. Output is ready to send to Telegram via Jarvis.
+an analysis report. Sends the briefing to Telegram via Jarvis.
 
 Usage:
     python jarvis_polymarket.py                  # trending markets analysis
     python jarvis_polymarket.py --search "FIFA"  # search by keyword
     python jarvis_polymarket.py --limit 10       # control how many markets to analyze
+    python jarvis_polymarket.py --no-telegram    # skip Telegram, print only
+
+Environment variables:
+    ANTHROPIC_API_KEY   — required
+    TELEGRAM_TOKEN      — required for Telegram delivery
+    TELEGRAM_CHAT_ID    — required for Telegram delivery (default: 7022147500)
 """
 
 import argparse
@@ -17,7 +23,9 @@ import requests
 from anthropic import Anthropic
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GAMMA_API   = "https://gamma-api.polymarket.com"
+GAMMA_API        = "https://gamma-api.polymarket.com"
+TELEGRAM_API     = "https://api.telegram.org"
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7022147500")
 CLAUDE_MODEL = "claude-opus-4-6"   # swap to claude-sonnet-4-6 to save cost
 MAX_MARKETS  = 20                   # default number of markets to pull
 
@@ -103,13 +111,41 @@ Deliver a clear, useful briefing I can act on."""
     return message.content[0].text
 
 
+# ── Telegram ──────────────────────────────────────────────────────────────────
+
+def send_to_telegram(text: str) -> bool:
+    """Send a message to Telegram. Returns True if successful."""
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        print("⚠️  TELEGRAM_TOKEN not set — skipping Telegram delivery.")
+        return False
+
+    # Telegram messages max 4096 chars — split if needed
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+
+    for i, chunk in enumerate(chunks):
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "parse_mode": "HTML",
+        }
+        r = requests.post(url, json=payload, timeout=10)
+        if not r.ok:
+            print(f"❌ Telegram error: {r.text}")
+            return False
+
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Jarvis Polymarket Analyzer")
-    parser.add_argument("--search", type=str, default=None, help="Search keyword")
-    parser.add_argument("--limit",  type=int, default=MAX_MARKETS, help="Number of markets")
-    parser.add_argument("--raw",    action="store_true", help="Print raw market data only, skip Claude")
+    parser.add_argument("--search",      type=str,  default=None,  help="Search keyword")
+    parser.add_argument("--limit",       type=int,  default=MAX_MARKETS, help="Number of markets")
+    parser.add_argument("--raw",         action="store_true", help="Print raw market data only, skip Claude")
+    parser.add_argument("--no-telegram", action="store_true", help="Skip Telegram delivery")
     args = parser.parse_args()
 
     print("🔍 Fetching Polymarket data...")
@@ -140,6 +176,13 @@ def main():
     print("=" * 60)
     print(analysis)
     print("=" * 60)
+
+    if not args.no_telegram:
+        header = "🤖 <b>Jarvis Polymarket Briefing</b>\n\n"
+        print("\n📨 Sending to Telegram...")
+        success = send_to_telegram(header + analysis)
+        if success:
+            print("✅ Delivered to Telegram!")
 
 
 if __name__ == "__main__":
