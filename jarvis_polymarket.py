@@ -84,23 +84,24 @@ def analyze_with_claude(markets_text: str, context: str = "trending") -> str:
     """Send market data to Claude and return a Telegram-ready analysis."""
     client = Anthropic()
 
-    system_prompt = """You are Jarvis, an AI research assistant specialized in prediction markets.
-Your job is to analyze Polymarket data and deliver sharp, actionable insights.
-Format your response for Telegram — use plain text, emojis sparingly, keep it concise.
-Structure: brief intro, top insights (3-5 bullets), one strategic takeaway at the end.
-Do not use markdown headers or bold — Telegram renders them as raw symbols."""
+    system_prompt = """Eres Jarvis, un asistente de investigación especializado en mercados de predicción.
+Tu trabajo es analizar datos de Polymarket y entregar insights claros y accionables.
+Responde SIEMPRE en español.
+Formatea tu respuesta para Telegram — texto plano, emojis con moderación, conciso.
+Estructura: introducción breve, insights principales (3-5 puntos), un takeaway estratégico al final.
+No uses headers markdown ni negrita — Telegram los muestra como símbolos."""
 
-    user_prompt = f"""Here are the current {context} Polymarket markets:
+    user_prompt = f"""Aquí están los mercados actuales de Polymarket ({context}):
 
 {markets_text}
 
-Analyze this data. Look for:
-1. Markets with surprising probabilities (under or overpriced vs reality)
-2. High-volume markets indicating strong crowd interest
-3. Interesting patterns or correlations between markets
-4. Any time-sensitive opportunities (ending soon with uncertain odds)
+Analiza estos datos. Busca:
+1. Mercados con probabilidades sorprendentes (sobre o subvalorados vs la realidad)
+2. Mercados con alto volumen que indican fuerte interés del mercado
+3. Patrones interesantes o correlaciones entre mercados
+4. Oportunidades urgentes (que cierran pronto con odds inciertas)
 
-Deliver a clear, useful briefing I can act on."""
+Entrega un briefing claro y útil en español."""
 
     message = client.messages.create(
         model=CLAUDE_MODEL,
