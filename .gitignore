@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Sensitive files
+*.txt
+market_prices.json
+*.bat
