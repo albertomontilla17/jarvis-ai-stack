@@ -10,12 +10,13 @@ Jarvis is a personal AI assistant running on [OpenClaw](https://github.com/openc
 
 | Layer | Tool |
 |---|---|
-| AI Agent | OpenClaw + Claude Opus 4.6 |
+| AI Agent | OpenClaw + Claude Sonnet 4.6 |
 | Messaging | Telegram (@Alberto_Montilla_claw_bot) |
 | Prediction Markets | Polymarket via PolyClaw (Chainstack) |
-| Payments | x402 protocol on Base (L2) |
-| Wallet | MetaMask (Polygon) + CDP Server Wallet + Circle Nanopayments |
-| Infra | AWS / Amazon Bedrock |
+| Wallet | Coinbase Wallet (Polygon) — 42 USDC.e funded |
+| RPC | Chainstack Global Node (Polygon Mainnet) |
+| Payments | x402 protocol on Base (L2) — coming soon |
+| Infra | AWS / Amazon Bedrock — coming soon |
 | Hardware | Lenovo Legion (Windows) |
 
 ---
@@ -34,33 +35,14 @@ Fetches trending or keyword-searched Polymarket markets, analyzes them with Clau
 
 **Usage:**
 ```bash
-# Analyze trending markets + send to Telegram
-python jarvis_polymarket.py
-
-# Search by keyword
-python jarvis_polymarket.py --search "FIFA"
-
-# Raw data only (no Claude, no Telegram)
-python jarvis_polymarket.py --raw
-
-# Skip Telegram, print only
-python jarvis_polymarket.py --no-telegram
-
-# Control number of markets
-python jarvis_polymarket.py --limit 10
+python jarvis_polymarket.py                  # trending markets + Telegram
+python jarvis_polymarket.py --search "FIFA"  # search by keyword
+python jarvis_polymarket.py --raw            # raw data only
+python jarvis_polymarket.py --no-telegram    # skip Telegram
+python jarvis_polymarket.py --limit 10       # control market count
 ```
 
-**Environment variables required:**
-```bash
-ANTHROPIC_API_KEY    # Anthropic API key
-TELEGRAM_TOKEN       # Telegram bot token
-TELEGRAM_CHAT_ID     # Your Telegram chat ID (default: 7022147500)
-```
-
-**Requirements:**
-```bash
-pip install anthropic requests
-```
+---
 
 ### 🚨 `jarvis_alerts.py`
 Monitors 50 Polymarket markets every hour for sudden price movements. Sends an immediate Telegram alert when any market moves more than 15%.
@@ -81,13 +63,41 @@ python jarvis_alerts.py
 
 ---
 
+### 🤖 `jarvis_trade.py`
+Autonomous trading module. Claude analyzes Polymarket opportunities and executes trades automatically via PolyClaw CLOB. Conservative by design — starts at $2/trade.
+
+**Features:**
+- Claude analyzes 20 markets and picks the best opportunity
+- Only trades when confidence >= 75%
+- Dry-run mode for testing without real money
+- Sends trade confirmation or "no opportunity" message to Telegram
+- Hard cap of $10 per trade
+
+**Usage:**
+```bash
+python jarvis_trade.py              # auto mode — Claude decides and trades
+python jarvis_trade.py --dry-run    # simulate only, no real trades
+python jarvis_trade.py --amount 5   # set trade size (default $2)
+python jarvis_trade.py --limit 30   # analyze more markets
+```
+
+**Environment variables required:**
+```bash
+ANTHROPIC_API_KEY
+TELEGRAM_TOKEN
+POLYCLAW_PRIVATE_KEY    # Coinbase Wallet private key
+CHAINSTACK_NODE         # Polygon RPC URL
+```
+
+---
+
 ### 🔑 `setup_polymarket_creds.py`
-Generates Polymarket CLOB API credentials (apiKey, secret, passphrase) from your MetaMask private key. Run once to set up trading access.
+Generates Polymarket CLOB API credentials (apiKey, secret, passphrase) from your wallet private key. Run once to set up trading access.
 
 **Usage:**
 ```bash
 $env:POLYGON_PRIVATE_KEY="0x..."
-$env:POLYGON_ADDRESS="0x228D8F8c9409df6C7793FD7A593885698209cAfd"
+$env:POLYGON_ADDRESS="0x2eEeaeE3F360c70Db75FB1d36ac8b9b97c58a675"
 python setup_polymarket_creds.py
 ```
 
@@ -95,17 +105,23 @@ python setup_polymarket_creds.py
 
 ## Setup
 
-### 1. Install OpenClaw
+### 1. Clone this repo
 ```bash
-npm install -g openclaw
+git clone https://github.com/albertomontilla17/jarvis-ai-stack.git
+cd jarvis-ai-stack
 ```
 
-### 2. Install clawhub
+### 2. Install dependencies
 ```bash
-npm install -g clawhub
+pip install anthropic requests py-clob-client-v2
 ```
 
-### 3. Install PolyClaw (Chainstack)
+### 3. Install OpenClaw + clawhub
+```bash
+npm install -g openclaw clawhub
+```
+
+### 4. Install PolyClaw (Chainstack)
 ```bash
 cd %USERPROFILE%\.openclaw\workspace\skills
 git clone https://github.com/chainstacklabs/polyclaw polyclaw-chainstack
@@ -113,57 +129,60 @@ cd polyclaw-chainstack
 uv sync
 ```
 
-### 4. Test PolyClaw CLI
-```bash
-# Trending markets
-uv run python scripts/polyclaw.py markets trending
+### 5. Get a Chainstack RPC node
+Sign up at [chainstack.com](https://chainstack.com), create a Polygon Mainnet Global Node, and copy the HTTPS endpoint.
 
-# Search by keyword
-uv run python scripts/polyclaw.py markets search "election"
-```
-
-### 5. Run Jarvis analysis script
-```bash
-# Set environment variables (Windows PowerShell)
-$env:ANTHROPIC_API_KEY="sk-ant-..."
-$env:TELEGRAM_TOKEN="your-token"
-
-python jarvis_polymarket.py
-```
-
-### 6. Automate with Windows Task Scheduler
-Create `run_jarvis_polymarket.bat`:
+### 6. Set environment variables
+Create your `.bat` files with:
 ```bat
 @echo off
 set ANTHROPIC_API_KEY=your-key
 set TELEGRAM_TOKEN=your-token
-cd C:\Users\alber\Documents\Projects\Polymarket
+set POLYCLAW_PRIVATE_KEY=0x...
+set CHAINSTACK_NODE=https://polygon-mainnet.core.chainstack.com/...
+set POLYGON_ADDRESS=0x...
+cd C:\path\to\jarvis-ai-stack
 python jarvis_polymarket.py
 ```
-Schedule via Task Scheduler → Create Basic Task → Daily → 12:00 PM.
+
+### 7. Approve Polymarket contracts (one-time)
+```bash
+cd %USERPROFILE%\.openclaw\workspace\skills\polyclaw-chainstack
+uv run python scripts/polyclaw.py wallet approve
+```
+
+### 8. Automate with Windows Task Scheduler
+- Daily briefing: 12:00 PM → `run_jarvis_polymarket.bat`
+- Hourly alerts: every 1 hour → `run_jarvis_alerts.bat`
 
 ---
 
 ## Roadmap
 
 - [x] Polymarket data via Gamma API
-- [x] Claude-powered market analysis
-- [x] Telegram delivery (Spanish)
+- [x] Claude-powered market analysis in Spanish
+- [x] Telegram delivery
 - [x] Windows Task Scheduler — daily briefing at 12:00 PM
-- [x] Anomaly alerts — hourly monitoring of 50 markets, Telegram alert on >15% move
-- [x] GitHub documentation
-- [ ] Polymarket trading — execute trades via PolyClaw CLOB on Polygon (wallet funded, pending bridge)
+- [x] Anomaly alerts — hourly monitoring of 50 markets
+- [x] Autonomous trading module with dry-run mode
+- [x] Wallet funded — 42 USDC.e on Polygon
+- [x] CLOB credentials generated
+- [x] Chainstack RPC node configured
+- [x] GitHub repo with local git workflow
+- [ ] Wallet approve — pending (nonce reset needed)
+- [ ] First live trade execution
 - [ ] x402 integration — expose analysis as a paid API endpoint
-- [ ] Amazon Bedrock AgentCore — migrate Jarvis to AWS with native x402 support
+- [ ] Amazon Bedrock AgentCore — migrate Jarvis to AWS
 
 ---
 
 ## Notes
 
 - Polymarket Gamma API is fully public — no auth required for read access
-- PolyClaw trading features require a Polygon wallet funded with USDC.e + Chainstack RPC node
-- Trading on Polymarket requires USDC.e on Polygon network (not Base)
-- All scripts in this repo are for research and educational purposes
+- Trading requires USDC.e on Polygon + POL for gas + Chainstack RPC
+- Polymarket browser trading is restricted in USA — use PolyClaw CLI instead
+- Never commit private keys or `.bat` files to GitHub
+- All scripts are for research and educational purposes
 
 ---
 
