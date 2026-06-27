@@ -221,3 +221,6 @@ __marimo__/
 *.txt
 market_prices.json
 *.bat
+
+set_env.ps1
+market_history.json
