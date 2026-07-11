@@ -25,9 +25,25 @@ GAMMA_API     = "https://gamma-api.polymarket.com"
 CLOB_API      = "https://clob.polymarket.com"
 DEFAULT_BUDGET = 100.0   # USDC ficticios por sesión
 MIN_CONFIDENCE = 0.60    # confianza mínima para entrar (se ajusta por aprendizaje)
-MAX_POSITION   = 0.30    # máx % del presupuesto por trade
+MAX_POSITION   = 0.30    # máx % del presupuesto por trade (techo duro, pase lo que pase con Kelly)
+
+# Kelly Criterion para position sizing (portado del motor avanzado).
+# KELLY_FRACTION < 1.0 = Kelly fraccionado (más conservador que Kelly completo).
+# Kelly completo apuesta el % matemáticamente óptimo a largo plazo PERO asume que
+# la probabilidad estimada (confidence de Claude) es exacta. Como no lo es,
+# usamos medio-Kelly (0.5) para amortiguar el impacto de estimaciones erróneas.
+KELLY_FRACTION = 0.5
 
 # ── DB Setup ──────────────────────────────────────────────────────────────────
+def _ensure_column(con, table: str, column: str, coltype: str):
+    """Agrega una columna si no existe (migración simple, no destructiva)."""
+    cur = con.cursor()
+    cols = [row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        con.commit()
+
+
 def init_db(db_path: str = DB_PATH):
     con = sqlite3.connect(db_path)
     cur = con.cursor()
@@ -67,7 +83,8 @@ def init_db(db_path: str = DB_PATH):
         rationale       TEXT,
         phase_open      TEXT,
         phase_close     TEXT,
-        strategy_ver    INTEGER
+        strategy_ver    INTEGER,
+        match_id        TEXT    -- partido al que pertenece (para presupuesto por partido)
     );
 
     CREATE TABLE IF NOT EXISTS strategy (
@@ -80,6 +97,10 @@ def init_db(db_path: str = DB_PATH):
         note            TEXT
     );
     """)
+
+    # Migración: columnas nuevas para trazabilidad del sizing Kelly (no rompe DBs viejas)
+    _ensure_column(con, "trades", "kelly_fraction", "REAL")   # f* crudo antes de aplicar KELLY_FRACTION/phase_weight
+    _ensure_column(con, "trades", "size_pct_applied", "REAL") # fracción final del budget realmente usada
 
     # Estrategia inicial si no existe
     cur.execute("SELECT COUNT(*) FROM strategy")
@@ -96,6 +117,28 @@ def init_db(db_path: str = DB_PATH):
     return con
 
 
+def kelly_fraction(confidence: float, price: float) -> float:
+    """
+    Fracción de Kelly para una apuesta binaria de Polymarket.
+
+    Comprar un share de un lado a `price` paga $1 si acierta y $0 si no.
+    Si `confidence` (probabilidad estimada por Claude de que ESE lado gane) es
+    mayor al precio, hay edge. La fórmula de Kelly para este payoff se reduce a:
+
+        f* = (confidence - price) / (1 - price)
+
+    Devuelve 0.0 si no hay edge positivo (confidence <= price) — en ese caso
+    Kelly dice explícitamente "no apuestes", sin importar qué tan segura diga
+    estar Claude en palabras.
+    """
+    p = min(max(confidence, 0.0), 1.0)
+    price = min(max(price, 0.01), 0.99)  # evitar división por cero en los bordes
+    edge = p - price
+    if edge <= 0:
+        return 0.0
+    return edge / (1 - price)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -108,6 +151,18 @@ def _f(val, default=0.0):
         return float(val)
     except (ValueError, TypeError):
         return float(default)
+
+def extract_match_id(slug: str) -> str:
+    """
+    Extrae el identificador del partido de un slug de mercado.
+    'fifwc-bra-jpn-2026-06-29-corners-total-8pt5' → 'fifwc-bra-jpn-2026-06-29'
+    Para slugs que no son de partido, devuelve el slug completo (su propio "partido").
+    """
+    import re
+    m = re.match(r"^(fifwc-[a-z]{3}-[a-z]{3}-\d{4}-\d{2}-\d{2})", slug)
+    if m:
+        return m.group(1)
+    return slug
 
 def _load_strategy(con):
     cur = con.cursor()
@@ -132,13 +187,16 @@ def fetch_market(slug_or_id: str) -> dict:
     Nota: un slug de EVENTO puede contener varios markets; tomamos el primero
     con orderbook activo. Para binarios YES/NO normalmente hay 1 solo.
     """
-    # 1. Filtrar por slug en /markets (slug de market)
-    r = requests.get(f"{GAMMA_API}/markets",
-                     params={"slug": slug_or_id}, headers=HEADERS, timeout=15)
-    if r.ok:
-        data = r.json()
-        if isinstance(data, list) and data:
-            return data[0]
+    # 1. Filtrar por slug en /markets (slug de market).
+    # Gamma filtra mercados cerrados por defecto: sin closed=true, un mercado
+    # YA RESUELTO devuelve [] aunque el slug exista. Se intenta primero sin
+    # el filtro (mercados activos) y luego con closed=true (resueltos).
+    for params in ({"slug": slug_or_id}, {"slug": slug_or_id, "closed": "true"}):
+        r = requests.get(f"{GAMMA_API}/markets", params=params, headers=HEADERS, timeout=15)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, list) and data:
+                return data[0]
 
     # 2. Por conditionId directo
     r = requests.get(f"{GAMMA_API}/markets/{slug_or_id}", headers=HEADERS, timeout=15)
@@ -309,25 +367,82 @@ PERFORMANCE HISTÓRICA POR FASE:
     return ctx
 
 
-# ── Claude Analysis ───────────────────────────────────────────────────────────
-def analyze_with_claude(
-    client: Anthropic,
-    market: dict,
-    context: str,
-    yes_price: float,
-    no_price: float,
-    phase: str,
-    budget_remaining: float,
-    strategy: dict
+# ── Claude Analysis: Debate Bull / Bear / Risk-Manager ────────────────────────
+# Portado del motor avanzado (carpeta Polymarket) — inspirado en
+# TauricResearch/TradingAgents. En vez de pedirle a Claude UNA decisión directa,
+# la partimos en 3 llamadas:
+#   1. Bull:         argumenta el caso más fuerte A FAVOR de una posición.
+#   2. Bear:         argumenta el caso más fuerte EN CONTRA (o para salir).
+#   3. Risk-Manager: ve ambos casos + el contexto y emite el veredicto final,
+#                     con poder de veto explícito (puede forzar HOLD).
+# Cuesta 3 llamadas a Claude por snapshot en vez de 1 — es mejora de calidad
+# de señal, no reducción de costo.
+MARKET_ANALYSIS_MODEL = "claude-sonnet-4-6"
+
+
+def _market_block(market: dict, yes_price: float, no_price: float, phase: str, budget_remaining: float) -> str:
+    return f"""MERCADO ACTUAL:
+  Pregunta: {market.get('question', 'N/A')}
+  Categoría: {market.get('category', 'N/A')}
+  YES price: {yes_price:.3f}
+  NO price:  {no_price:.3f}
+  Fase:      {phase}
+  Presupuesto restante: ${budget_remaining:.2f} USDC (ficticio)"""
+
+
+def _bull_case(client: Anthropic, market: dict, context: str, yes_price: float,
+               no_price: float, phase: str, budget_remaining: float) -> str:
+    """Investigador Bull: caso más fuerte A FAVOR de tomar (o mantener) una posición."""
+    system = """Eres el investigador ALCISTA (Bull) del equipo de trading de Jarvis para
+mercados de predicción de Polymarket. Tu trabajo es construir el caso MÁS FUERTE
+posible a favor de tomar (o mantener) una posición en el lado que consideres más
+prometedor, YES o NO. Basa tu argumento SOLO en los datos del contexto: historial
+de precios, momentum, performance histórica por fase, y trades abiertos.
+No inventes datos que no estén en el contexto. Sé específico y cita números.
+Responde en texto plano en español, 3-4 oraciones, sin JSON."""
+
+    prompt = f"{context}\n\n{_market_block(market, yes_price, no_price, phase, budget_remaining)}\n\nConstruye el caso alcista."
+
+    resp = client.messages.create(
+        model=MARKET_ANALYSIS_MODEL, max_tokens=300, system=system,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return resp.content[0].text.strip()
+
+
+def _bear_case(client: Anthropic, market: dict, context: str, yes_price: float,
+               no_price: float, phase: str, budget_remaining: float) -> str:
+    """Investigador Bear: caso más fuerte EN CONTRA de entrar (o a favor de salir)."""
+    system = """Eres el investigador BAJISTA (Bear) del equipo de trading de Jarvis para
+mercados de predicción de Polymarket. Tu trabajo es construir el caso MÁS FUERTE
+posible EN CONTRA de abrir una posición nueva ahora mismo (o a favor de cerrar
+una posición abierta si la hay). Busca señales de sobre-extensión del precio,
+reversión, baja liquidez, ruido vs. señal real, y mal historial en esta fase.
+Basa tu argumento SOLO en los datos del contexto, no inventes. Sé específico.
+Responde en texto plano en español, 3-4 oraciones, sin JSON."""
+
+    prompt = f"{context}\n\n{_market_block(market, yes_price, no_price, phase, budget_remaining)}\n\nConstruye el caso bajista / de cautela."
+
+    resp = client.messages.create(
+        model=MARKET_ANALYSIS_MODEL, max_tokens=300, system=system,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return resp.content[0].text.strip()
+
+
+def _risk_manager_decision(
+    client: Anthropic, market: dict, context: str,
+    yes_price: float, no_price: float, phase: str, budget_remaining: float,
+    strategy: dict, bull_case: str, bear_case: str
 ) -> dict:
-    """
-    Llama a Claude para decidir: ENTER_YES, ENTER_NO, HOLD, EXIT.
-    Retorna dict con action, side, size_pct, confidence, rationale.
-    """
+    """Gestor de riesgo: ve ambos casos y emite el veredicto final. Tiene poder de veto."""
 
-    system = """Eres el motor de decisión de Jarvis, un sistema de paper trading para mercados de predicción Polymarket.
+    system = """Eres el GESTOR DE RIESGO de Jarvis, el veto final antes de cualquier trade en
+mercados de predicción Polymarket. Recibes el caso Bull (a favor) y el caso Bear
+(en contra) de tu equipo de analistas. Tu trabajo NO es promediar ambos casos —
+es decidir cuál pesa más dado el contexto real, y VETAR el trade (HOLD) si el
+caso Bear señala un riesgo que el Bull no logra refutar con datos concretos.
 
-Tu trabajo es analizar el contexto del mercado y decidir UNA acción.
 Responde SOLO en JSON válido con este formato exacto:
 
 {
@@ -335,40 +450,50 @@ Responde SOLO en JSON válido con este formato exacto:
   "side": "YES" | "NO" | null,
   "size_pct": 0.0-1.0,
   "confidence": 0.0-1.0,
-  "rationale": "explicación breve en español"
+  "rationale": "explicación breve en español de por qué ganó Bull o Bear"
 }
+
+IMPORTANTE sobre "confidence": el tamaño real de la posición YA NO lo decides tú
+con size_pct. Se calcula automáticamente con Kelly Criterion a partir de tu
+"confidence": f* = (confidence - precio_de_entrada) / (1 - precio_de_entrada).
+Esto significa que "confidence" debe ser tu ESTIMACIÓN HONESTA de la probabilidad
+real de que ese lado gane (no "qué tan convencido te sientes" en abstracto). Si
+confidence <= precio de entrada, Kelly calcula 0% de tamaño (no hay edge) y el
+trade no se ejecuta aunque hayas puesto action=ENTER. Sé calibrado, no optimista:
+sobreestimar confidence hace que el sistema apueste de más sin que tú lo notes.
+"size_pct" sigue en el JSON por compatibilidad pero es solo informativo, no se usa.
 
 Reglas:
 - ENTER solo si confidence >= min_confidence de la estrategia actual
-- size_pct: qué fracción del presupuesto usar (máx = max_position de estrategia)
-- En fase 'early': sé más conservador (size_pct bajo)
-- En fase 'late': puedes ser más agresivo si la señal es clara
-- EXIT si tienes una posición abierta y el precio se movió contra ti >15%
-- HOLD si no hay señal clara o ya tienes posición en ese lado
+- En fase 'early': el veto pesa más — ante duda razonable del Bear, HOLD
+- En fase 'late': puedes reflejar mayor confianza si el Bull tiene datos concretos
+  y el Bear no logra refutarlos
+- EXIT si tienes una posición abierta y el precio se movió contra ti >15%,
+  o si el caso Bear para esa posición es contundente
+- HOLD si el caso Bull y el caso Bear están parejos, o si ya tienes posición en ese lado
 - Aprende de la performance histórica por fase mostrada en el contexto"""
 
     prompt = f"""
 {context}
 
-MERCADO ACTUAL:
-  Pregunta: {market.get('question', 'N/A')}
-  Categoría: {market.get('category', 'N/A')}
-  YES price: {yes_price:.3f}
-  NO price:  {no_price:.3f}
-  Fase:      {phase}
-  Presupuesto restante: ${budget_remaining:.2f} USDC (ficticio)
+{_market_block(market, yes_price, no_price, phase, budget_remaining)}
 
-Decide tu acción ahora."""
+ESTRATEGIA ACTUAL: min_confidence={strategy['min_confidence']:.0%}, max_position={strategy['max_position']:.0%}
+
+=== CASO BULL (a favor) ===
+{bull_case}
+
+=== CASO BEAR (en contra / cautela) ===
+{bear_case}
+
+Pesa ambos casos y emite tu veredicto final ahora."""
 
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=400,
-        system=system,
+        model=MARKET_ANALYSIS_MODEL, max_tokens=400, system=system,
         messages=[{"role": "user", "content": prompt}]
     )
 
     raw = resp.content[0].text.strip()
-    # Limpiar posibles backticks
     raw = raw.replace("```json", "").replace("```", "").strip()
 
     try:
@@ -385,11 +510,40 @@ Decide tu acción ahora."""
     return decision
 
 
+def analyze_with_claude(
+    client: Anthropic,
+    market: dict,
+    context: str,
+    yes_price: float,
+    no_price: float,
+    phase: str,
+    budget_remaining: float,
+    strategy: dict
+) -> dict:
+    """
+    Orquesta el debate Bull / Bear / Risk-Manager y devuelve la decisión final.
+    Firma y forma de retorno idénticas a la versión anterior (action, side,
+    size_pct, confidence, rationale) — main() no necesita cambios. Además
+    incluye "_bull_case" y "_bear_case" para trazabilidad/debug.
+    """
+    bull_case = _bull_case(client, market, context, yes_price, no_price, phase, budget_remaining)
+    bear_case = _bear_case(client, market, context, yes_price, no_price, phase, budget_remaining)
+    decision = _risk_manager_decision(
+        client, market, context, yes_price, no_price, phase,
+        budget_remaining, strategy, bull_case, bear_case
+    )
+
+    decision["_bull_case"] = bull_case
+    decision["_bear_case"] = bear_case
+    return decision
+
+
 # ── Trade Execution (ficticio) ────────────────────────────────────────────────
 def execute_paper_trade(
     con, market_id: str, decision: dict,
     yes_price: float, no_price: float,
-    budget: float, phase: str, strategy: dict
+    budget: float, phase: str, strategy: dict,
+    match_id: str = None
 ) -> dict | None:
     """Registra un trade ficticio en la DB."""
     action = decision.get("action", "HOLD")
@@ -431,23 +585,57 @@ def execute_paper_trade(
     if action in ("ENTER_YES", "ENTER_NO"):
         side        = "YES" if action == "ENTER_YES" else "NO"
         entry_price = yes_price if side == "YES" else no_price
-        max_size    = budget * strategy["max_position"]
-        size_usdc   = min(budget * decision.get("size_pct", 0.1), max_size)
+        confidence  = decision.get("confidence", 0.0)
 
-        if size_usdc < 1.0:
-            return None  # trade demasiado pequeño
+        # GUARD: no entrar sin margen real. Comprar a >=0.95 deja casi nada
+        # de ganancia posible (máx sube a 1.00) y mucho que perder.
+        MAX_ENTRY_PRICE = 0.95
+        if entry_price >= MAX_ENTRY_PRICE:
+            print(f"   ⛔ Bloqueado: {side} @{entry_price:.3f} sin margen (>= {MAX_ENTRY_PRICE})")
+            return None
+
+        # Guardrail: umbral de confianza de la estrategia forzado en código
+        # (antes era solo una instrucción en el prompt).
+        if confidence < strategy["min_confidence"]:
+            return {
+                "action": "SKIP_LOW_CONFIDENCE",
+                "reason": f"confidence {confidence:.0%} < min_confidence {strategy['min_confidence']:.0%}"
+            }
+
+        # Kelly Criterion en vez de size_pct fijo decidido por Claude.
+        f_kelly = kelly_fraction(confidence, entry_price)
+        if f_kelly <= 0:
+            return {
+                "action": "SKIP_NO_EDGE",
+                "reason": f"Kelly no ve edge: confidence={confidence:.0%} vs precio={entry_price:.2f}"
+            }
+
+        phase_weight = strategy["phase_weights"].get(phase, 1.0)
+        f_final = f_kelly * KELLY_FRACTION * phase_weight
+        f_final = min(f_final, strategy["max_position"])  # max_position sigue como techo duro
+
+        size_usdc = budget * f_final
+
+        # GUARD: no entrar si no queda presupuesto o el trade es demasiado pequeño
+        if budget < 1.0 or size_usdc < 1.0:
+            print(f"   ⛔ Sin presupuesto suficiente para entrar (disponible: ${budget:.2f})")
+            return None
 
         trade_id = cur.execute("""
             INSERT INTO trades
                 (market_id, ts_open, side, entry_price, size_usdc, outcome,
-                 confidence, rationale, phase_open, strategy_ver)
-            VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
+                 confidence, rationale, phase_open, strategy_ver, match_id,
+                 kelly_fraction, size_pct_applied)
+            VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
         """, (
             market_id, _now(), side, entry_price, size_usdc,
-            decision.get("confidence", 0),
+            confidence,
             decision.get("rationale", ""),
             phase,
-            strategy["version"]
+            strategy["version"],
+            match_id,
+            f_kelly,
+            f_final,
         )).lastrowid
 
         con.commit()
@@ -456,10 +644,103 @@ def execute_paper_trade(
             "trade_id": trade_id,
             "side": side,
             "entry": entry_price,
-            "size": size_usdc
+            "size": size_usdc,
+            "kelly_fraction": f_kelly,
+            "size_pct_applied": f_final,
         }
 
     return None
+
+
+# ── Reconciliación ────────────────────────────────────────────────────────────
+def fetch_clob_market(condition_id: str) -> dict:
+    """
+    Consulta el mercado directo por conditionId en la API de CLOB.
+    A diferencia de la Gamma API (fetch_market), CLOB conserva el registro
+    de mercados YA RESUELTOS/archivados con su precio final por token
+    ('tokens': [{'outcome': 'Yes'/'No', 'price': 1 o 0, 'winner': bool}]),
+    que es justo lo que Gamma deja de indexar por slug pasado un tiempo.
+    """
+    try:
+        r = requests.get(f"{CLOB_API}/markets/{condition_id}", headers=HEADERS, timeout=15)
+        if r.ok:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
+def settle_resolved_positions(con) -> list:
+    """
+    Revisa todas las posiciones 'open' y liquida las que pertenecen a mercados
+    ya resueltos en Polymarket, al precio final (determinista, sin gastar
+    llamadas a Claude). Sin esto, una posición cuyo mercado ya resolvió pero
+    que el runner nunca vuelve a visitar (p.ej. partidos de días pasados)
+    se queda 'open' para siempre y su tamaño sigue restando del presupuesto
+    disponible en cada corrida futura.
+    """
+    cur = con.cursor()
+    open_market_ids = [r[0] for r in cur.execute(
+        "SELECT DISTINCT market_id FROM trades WHERE outcome='open'"
+    ).fetchall()]
+
+    settled = []
+    for market_id in open_market_ids:
+        row = cur.execute(
+            "SELECT slug, question FROM markets WHERE id=?", (market_id,)
+        ).fetchone()
+        slug     = (row[0] if row else None) or market_id
+        question = (row[1] if row else None) or market_id
+
+        market = fetch_clob_market(market_id)
+        if not market:
+            print(f"⚠️  No se pudo revisar '{slug}' para liquidar (sin respuesta de CLOB)")
+            continue
+
+        if not market.get("closed"):
+            continue  # sigue en juego, no tocar
+
+        # Igual que parse_prices() con la Gamma API: Polymarket no siempre
+        # nombra los outcomes "Yes"/"No" (p.ej. "Over"/"Under" en mercados de
+        # corners), así que el mapeo es por POSICIÓN — tokens[0] es el lado
+        # que Jarvis registró como "YES" al abrir el trade, tokens[1] como "NO".
+        tokens = market.get("tokens", [])
+        yes_price = no_price = None
+        if len(tokens) >= 2:
+            p0, p1 = tokens[0].get("price"), tokens[1].get("price")
+            yes_price = float(p0) if p0 is not None else None
+            no_price  = float(p1) if p1 is not None else None
+
+        if yes_price is None or no_price is None:
+            print(f"⚠️  '{slug}' está cerrado pero sin precios finales — se deja abierto")
+            continue
+
+        open_trades = cur.execute(
+            "SELECT id, side, entry_price, size_usdc FROM trades WHERE market_id=? AND outcome='open'",
+            (market_id,)
+        ).fetchall()
+
+        for tid, side, entry, size in open_trades:
+            exit_price = yes_price if side == "YES" else no_price
+            pnl_usdc   = (exit_price - entry) * size
+            pnl_pct    = pnl_usdc / size if size > 0 else 0
+            outcome    = "win" if pnl_usdc > 0 else "loss"
+
+            cur.execute("""
+                UPDATE trades SET
+                    ts_close=?, exit_price=?, pnl_usdc=?, pnl_pct=?,
+                    outcome=?, phase_close='closed'
+                WHERE id=?
+            """, (_now(), exit_price, pnl_usdc, pnl_pct, outcome, tid))
+
+            settled.append({
+                "market_id": market_id, "question": question, "trade_id": tid,
+                "side": side, "entry": entry, "exit": exit_price,
+                "pnl": pnl_usdc, "outcome": outcome
+            })
+
+    con.commit()
+    return settled
 
 
 # ── Aprendizaje ───────────────────────────────────────────────────────────────
@@ -585,7 +866,12 @@ def print_report(con, market_id: str, budget_start: float, budget_now: float):
 def main():
     parser = argparse.ArgumentParser(description="Jarvis Paper Trading Engine")
     parser.add_argument("--market",  required=True, help="Slug o conditionId del mercado")
-    parser.add_argument("--budget",  type=float, default=DEFAULT_BUDGET, help="Presupuesto ficticio en USDC")
+    parser.add_argument("--budget",  type=float, default=DEFAULT_BUDGET, help="Presupuesto total ficticio en USDC")
+    parser.add_argument("--match-id", default=None,
+                        help="Identificador de grupo para el presupuesto compartido. "
+                             "Si se omite, se deriva del slug (solo agrupa fifwc-*).")
+    parser.add_argument("--match-budget", type=float, default=None,
+                        help="Presupuesto por partido. Si se da, limita el gasto por partido.")
     parser.add_argument("--once",    action="store_true", help="Ejecutar una sola vez (para Task Scheduler)")
     args = parser.parse_args()
 
@@ -625,7 +911,22 @@ def main():
     yes_price, no_price = parse_prices(market)
     volume = float(market.get("volume", 0) or 0)
 
+    # SKIP MERCADOS RESUELTOS: si el precio ya está decidido (>0.95 o <0.05),
+    # no vale la pena analizar — ahorra tokens de Claude. EXCEPCIÓN: si hay
+    # posición abierta aquí, seguimos para poder hacer EXIT.
+    match_id = args.match_id or extract_match_id(args.market)
     cur = con.cursor()
+    has_open = cur.execute(
+        "SELECT COUNT(*) FROM trades WHERE market_id=? AND outcome='open'",
+        (market_id,)
+    ).fetchone()[0]
+
+    RESOLVED_HI, RESOLVED_LO = 0.95, 0.05
+    if (yes_price >= RESOLVED_HI or yes_price <= RESOLVED_LO) and not has_open:
+        print(f"\n📈 YES: {yes_price:.3f} | NO: {no_price:.3f}")
+        print(f"⏭️  Mercado ya resuelto (YES={yes_price:.3f}) — saltando análisis")
+        return
+
     snapshots = cur.execute(
         "SELECT * FROM snapshots WHERE market_id=? ORDER BY ts DESC LIMIT 20",
         (market_id,)
@@ -645,19 +946,42 @@ def main():
         (market_id,)
     ).fetchall()
 
-    # Trades abiertos
+    # Trades abiertos DE ESTE mercado (para contexto de Claude)
     open_trades = cur.execute(
         "SELECT * FROM trades WHERE market_id=? AND outcome='open'",
         (market_id,)
     ).fetchall()
 
-    # Calcular budget restante (descontar posiciones abiertas)
-    # t[7] = size_usdc (NO t[6] que es exit_price)
-    invested = sum(_f(t[7]) for t in open_trades)
-    budget_remaining = budget - invested
+    # PRESUPUESTO POR PARTIDO: si se especifica --match-budget, el límite es
+    # por partido (todos los mercados del mismo partido comparten ese budget).
+    # Si no, se usa el presupuesto global compartido.
+    if args.match_budget:
+        per_match = args.match_budget
+        match_invested = _f(cur.execute(
+            "SELECT COALESCE(SUM(size_usdc), 0) FROM trades WHERE match_id=? AND outcome='open'",
+            (match_id,)
+        ).fetchone()[0])
+        match_realized = _f(cur.execute(
+            "SELECT COALESCE(SUM(pnl_usdc), 0) FROM trades WHERE match_id=? AND outcome IN ('win','loss')",
+            (match_id,)
+        ).fetchone()[0])
+        budget_remaining = per_match + match_realized - match_invested
+        print(f"\n📈 YES: {yes_price:.3f} | NO: {no_price:.3f} | Fase: {phase}")
+        print(f"💼 Partido {match_id.replace('fifwc-','')}: invertido ${match_invested:.2f} / ${per_match:.2f} | Disponible: ${budget_remaining:.2f}")
+    else:
+        global_invested = _f(cur.execute(
+            "SELECT COALESCE(SUM(size_usdc), 0) FROM trades WHERE outcome='open'"
+        ).fetchone()[0])
+        global_realized = _f(cur.execute(
+            "SELECT COALESCE(SUM(pnl_usdc), 0) FROM trades WHERE outcome IN ('win','loss')"
+        ).fetchone()[0])
+        budget_remaining = budget + global_realized - global_invested
+        print(f"\n📈 YES: {yes_price:.3f} | NO: {no_price:.3f} | Fase: {phase}")
+        print(f"💼 Invertido (global): ${global_invested:.2f} | Disponible: ${budget_remaining:.2f}")
 
-    print(f"\n📈 YES: {yes_price:.3f} | NO: {no_price:.3f} | Fase: {phase}")
-    print(f"💼 Invertido: ${invested:.2f} | Disponible: ${budget_remaining:.2f}")
+    # Si no queda presupuesto, avisar
+    if budget_remaining < 1.0:
+        print("   ⛔ Sin presupuesto disponible — solo se permitirá HOLD/EXIT")
 
     # Estrategia actual
     strategy = _load_strategy(con)
@@ -681,20 +1005,24 @@ def main():
     print(f"   Confianza: {confidence:.0%}")
     print(f"   Razón: {rationale}")
 
-    # Ejecutar trade ficticio
+    # Ejecutar trade ficticio (usa el presupuesto disponible para sizing)
     result = execute_paper_trade(
         con, market_id, decision,
         yes_price, no_price,
-        budget, phase, strategy
+        budget_remaining, phase, strategy,
+        match_id=match_id
     )
 
     if result:
         if result["action"] == "ENTER":
-            print(f"\n✅ Trade #{result['trade_id']} abierto: {result['side']} @ {result['entry']:.3f} | ${result['size']:.2f}")
+            print(f"\n✅ Trade #{result['trade_id']} abierto: {result['side']} @ {result['entry']:.3f} | "
+                  f"${result['size']:.2f} (Kelly f*={result['kelly_fraction']:.1%} → aplicado {result['size_pct_applied']:.1%})")
         elif result["action"] == "EXIT":
             for c in result["closed"]:
                 emoji = "🟢" if c["outcome"] == "win" else "🔴"
                 print(f"{emoji} Trade #{c['id']} cerrado | PnL: ${c['pnl']:.2f} ({c['outcome']})")
+        elif result["action"] in ("SKIP_NO_EDGE", "SKIP_LOW_CONFIDENCE"):
+            print(f"⛔ Entrada rechazada ({result['action']}): {result['reason']}")
     else:
         print("⏸️  Sin cambios en posición.")
 

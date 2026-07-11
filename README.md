@@ -91,6 +91,50 @@ CHAINSTACK_NODE         # Polygon RPC URL
 
 ---
 
+### 🧠 `jarvis_paper_trade.py` — motor de paper trading (Kelly + debate)
+Motor de decisión unificado. Por cada mercado: detecta la fase (early/mid/late),
+corre un debate de 3 llamadas a Claude (investigador Bull, investigador Bear, y
+Risk-Manager con poder de veto), y dimensiona la posición con **Kelly Criterion
+fraccionado** (medio-Kelly). Guardrails forzados en código, no en el prompt:
+
+- `SKIP_LOW_CONFIDENCE` — confianza por debajo del umbral de la estrategia
+- `SKIP_NO_EDGE` — Kelly no ve edge (confidence <= precio de entrada) ⇒ no se apuesta
+- Techo duro `max_position` y guard de precio máximo de entrada (0.95)
+- Presupuesto compartido por evento (`--match-id`): todos los props de un mismo
+  partido/pelea comparten un solo límite — no se puede "diversificar" en 7
+  mercados correlacionados del mismo evento
+- **Liquidación automática** (`settle_resolved_positions`): al inicio de cada
+  ciclo revisa las posiciones abiertas contra la API de CLOB (que sí conserva
+  mercados resueltos, a diferencia de Gamma) y las cierra al precio final real
+
+```bash
+python jarvis_paper_trade.py --market <slug> --once --match-budget 15 --match-id <evento>
+```
+
+### 📡 `jarvis_market_selector.py` — selector de mercados en 2 etapas
+Decide QUÉ mercados vale la pena seguir, con justificación explícita.
+
+1. **Filtro duro en código** (sin costo de API): universo de Polymarket por
+   volumen 24h, filtrado por liquidez mínima, ventana de resolución de 2-30 días
+   y precio no decidido (0.05-0.95).
+2. **Selección razonada con Claude** (1 llamada/día, cacheada por fecha): elige
+   una watchlist diversificada (máx. 2 mercados por evento subyacente) y guarda
+   el porqué de cada elección y el tipo de edge esperado (`mispricing`,
+   `information`, `event-volatility`, `time-decay`) en la tabla `watchlist` —
+   así después se puede evaluar no solo los trades sino las selecciones.
+
+```bash
+python jarvis_market_selector.py            # watchlist de hoy (crea si no existe)
+python jarvis_market_selector.py --refresh  # forzar nueva selección
+python jarvis_market_selector.py --dry-run  # solo candidatos, sin Claude
+```
+
+### 🔁 `jarvis_paper_runner.py` — orquestador para Task Scheduler
+Cada ciclo: liquida posiciones resueltas → obtiene la watchlist del día →
+expande cada mercado/evento en sus sub-mercados → corre el motor sobre cada uno
+con presupuesto por evento → manda resumen consolidado a Telegram (incluye las
+justificaciones de la watchlist el día que la selección es nueva).
+
 ### 🔑 `setup_polymarket_creds.py`
 Generates Polymarket CLOB API credentials (apiKey, secret, passphrase) from your wallet private key. Run once to set up trading access.
 
@@ -169,10 +213,23 @@ uv run python scripts/polyclaw.py wallet approve
 - [x] CLOB credentials generated
 - [x] Chainstack RPC node configured
 - [x] GitHub repo with local git workflow
+- [x] Liquidación automática de posiciones al resolverse el mercado (vía CLOB API)
+- [x] Kelly Criterion (medio-Kelly) para position sizing
+- [x] Debate Bull / Bear / Risk-Manager (3 llamadas a Claude por decisión, con veto)
+- [x] Selector de mercados en 2 etapas con watchlist diversificada y justificada
+- [x] Presupuesto compartido por evento (props correlacionados no multiplican exposición)
+- [x] Backtest contra mercados resueltos reales (muestra preliminar: 3 entradas en
+      ~185 decisiones, direccionales correctas; Kelly vetó sistemáticamente entradas
+      sin edge — vs. -$17.11 y 33% win rate del motor simple anterior)
+- [ ] Completar backtest ampliado (~6 mercados pendientes)
 - [ ] Wallet approve — pending (nonce reset needed)
 - [ ] First live trade execution
 - [ ] x402 integration — expose analysis as a paid API endpoint
 - [ ] Amazon Bedrock AgentCore — migrate Jarvis to AWS
+
+> **Estado (julio 2026):** proyecto en pausa — las 3 tareas de Task Scheduler
+> están deshabilitadas. La infraestructura queda funcional; para retomar:
+> recargar créditos de la API de Anthropic y re-habilitar las tareas.
 
 ---
 
