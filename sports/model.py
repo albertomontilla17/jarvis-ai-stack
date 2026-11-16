@@ -110,8 +110,12 @@ class Fitted:
     n_train: int
 
 
-def fit(con, league: str, cutoff_ts: int) -> Fitted:
-    games = load_games(con, league)
+def fit(con, league: str, cutoff_ts: int, upcoming: list[Game] | None = None) -> Fitted:
+    """
+    `upcoming`: partidos aún no jugados (marcador 0-0) que se añaden al final para
+    obtener su predicción; deben tener ts >= cutoff_ts para no entrar al ajuste.
+    """
+    games = load_games(con, league) + sorted(upcoming or [], key=lambda g: g.ts)
     y = np.array([1.0 if g.home_score > g.away_score else 0.0 for g in games])
     train = np.array([g.ts < cutoff_ts for g in games])
     if train.sum() < 200:

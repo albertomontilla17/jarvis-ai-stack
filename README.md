@@ -102,6 +102,18 @@ El precio de Kalshi predice mejor que este modelo en las tres ligas, y el modelo
 que el precio no contenga ya. Cuando el modelo "ve" una ventaja, casi siempre es porque le falta
 información que el mercado sí tiene (lesiones, alineaciones, descansos de estrellas).
 
+### Analizador activo (registro en vivo, sin dinero)
+
+```bash
+python -m sports live                          # modelo + bajas + precio de Kalshi de los partidos próximos
+python -m sports adjust <gid> 0.62 "motivo"    # probabilidad ajustada del local (lesiones, alineaciones)
+python -m sports results                       # mercado vs modelo base vs modelo ajustado
+```
+
+Cada corrida guarda en `sports_log.db` el pronóstico previo a cada partido de NBA, NHL y NFL.
+Los ajustes solo se aceptan antes del inicio. Criterio para pasar a dinero real: 200+ partidos
+terminados en los que el modelo ajustado tenga menor log-loss que el mercado y ROI con IC > 0.
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
