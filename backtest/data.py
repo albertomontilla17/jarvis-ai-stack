@@ -161,11 +161,16 @@ def fetch_history(token: str, start_ts: int, end_ts: int) -> list[tuple[int, flo
     return sorted(out.items())
 
 
-def download_prices(con, sample: int, max_days: int, seed: int = 7, workers: int = 8) -> int:
+def download_prices(con, sample: int, max_days: int, seed: int = 7, workers: int = 8,
+                    categories: list[str] | None = None) -> int:
     """Baja historial horario para una muestra ALEATORIA de mercados sin precios aún."""
+    where, args = "", []
+    if categories:
+        where = f" AND category IN ({','.join('?' * len(categories))})"
+        args = list(categories)
     rows = con.execute(
-        "SELECT id, yes_token, start_ts, closed_ts FROM markets WHERE has_prices = 0 ORDER BY id"
-    ).fetchall()
+        "SELECT id, yes_token, start_ts, closed_ts FROM markets WHERE has_prices = 0"
+        + where + " ORDER BY id", args).fetchall()
     random.Random(seed).shuffle(rows)
     rows = rows[:sample]
 

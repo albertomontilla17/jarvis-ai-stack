@@ -25,6 +25,12 @@ def cmd_download(a):
     print(f"✅ {tot} mercados en la base, {with_p or 0} con historial de precios")
 
 
+def cmd_prices(a):
+    con = data.connect(a.db)
+    n = data.download_prices(con, a.sample, a.max_days, seed=a.seed, categories=a.categories)
+    print(f"✅ {n} historiales nuevos ({', '.join(a.categories or ['todas las categorías'])})")
+
+
 def _load(a):
     markets = engine.load_markets(data.connect(a.db))
     if not markets:
@@ -34,6 +40,8 @@ def _load(a):
 
 def cmd_calibration(a):
     markets = _load(a)
+    if a.category:
+        markets = [m for m in markets if m.category in a.category]
     rows = report.calibration(markets, a.hours)
     print(f"\n📐 CALIBRACIÓN — precio de YES {a.hours:.0f}h antes del cierre programado "
           f"vs. frecuencia real ({sum(r['n'] for r in rows)} mercados)\n")
@@ -46,7 +54,9 @@ def cmd_calibration(a):
 def cmd_run(a):
     markets = _load(a)
     if a.category:
-        markets = [m for m in markets if m.category == a.category]
+        markets = [m for m in markets if m.category in a.category]
+        if not markets:
+            raise SystemExit(f"Sin mercados con precios en {a.category}")
     t0, t1 = markets[0].closed_ts, markets[-1].closed_ts
     cutoff = t0 + (t1 - t0) * 0.6
     day = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).date()
@@ -88,14 +98,22 @@ def main():
     d.add_argument("--seed", type=int, default=7)
     d.set_defaults(fn=cmd_download)
 
+    pr = sub.add_parser("prices", help="Bajar más historiales (p.ej. solo de ciertas categorías)")
+    pr.add_argument("--categories", nargs="*", help="sports, finance_prices, economics, crypto, ...")
+    pr.add_argument("--sample", type=int, default=3000)
+    pr.add_argument("--max-days", type=int, default=30)
+    pr.add_argument("--seed", type=int, default=7)
+    pr.set_defaults(fn=cmd_prices)
+
     c = sub.add_parser("calibration", help="¿El precio ya es una buena probabilidad?")
     c.add_argument("--hours", type=float, default=24)
+    c.add_argument("--category", nargs="*", default=None)
     c.set_defaults(fn=cmd_calibration)
 
     r = sub.add_parser("run", help="Correr las estrategias base")
     r.add_argument("--half-spread", type=float, default=engine.HALF_SPREAD)
     r.add_argument("--fee", type=float, default=None, help="forzar tasa de comisión (p.ej. 0.05)")
-    r.add_argument("--category", default=None)
+    r.add_argument("--category", nargs="*", default=None, help="filtrar por categoría(s)")
     r.add_argument("--bankroll", type=float, default=100.0)
     r.add_argument("--stake-pct", type=float, default=0.02)
     r.set_defaults(fn=cmd_run)
