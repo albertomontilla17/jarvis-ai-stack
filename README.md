@@ -135,6 +135,29 @@ expande cada mercado/evento en sus sub-mercados → corre el motor sobre cada un
 con presupuesto por evento → manda resumen consolidado a Telegram (incluye las
 justificaciones de la watchlist el día que la selección es nueva).
 
+### 🧪 `backtest/` — backtester (antes de poner dinero real)
+Responde con datos históricos a la pregunta "¿esta estrategia habría ganado dinero después de costos?".
+Construido por piezas independientes, cada una probada por separado:
+
+| Pieza | Archivo | Qué hace |
+|---|---|---|
+| 1. Datos | `backtest/data.py` | Baja mercados **resueltos** y su historial horario de precios a `backtest_data.db` (sin API key) |
+| 2. Simulador | `backtest/engine.py` | Reproduce cada mercado barra a barra, sin lookahead, con spread + comisiones, PnL en shares |
+| 3. Estrategias | `backtest/strategies.py` | Reglas base sin LLM (favorito, longshot, momentum, reversión) + control aleatorio |
+| 4. Métricas | `backtest/report.py` | ROI por $ apostado con IC 95% (bootstrap por evento), dentro/fuera de muestra, calibración |
+
+```bash
+python -m backtest download --from 2026-06-01 --to 2026-11-01 --sample 5000
+python -m backtest calibration        # ¿el precio ya es una buena probabilidad?
+python -m backtest run                # estrategias base, con y sin datos fuera de muestra
+python -m unittest discover tests     # tests del simulador
+```
+
+Una estrategia nueva es cualquier función `f(view) -> Signal | None` (ver `strategies.py`).
+Criterio para considerar dinero real: límite inferior del IC 95% > 0 **fuera de muestra**.
+
+---
+
 ### 🔑 `setup_polymarket_creds.py`
 Generates Polymarket CLOB API credentials (apiKey, secret, passphrase) from your wallet private key. Run once to set up trading access.
 

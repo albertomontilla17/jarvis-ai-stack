@@ -228,3 +228,6 @@ market_history.json
 set_env.ps1
 
 paper_trades.db
+
+# Backtest: datos descargados (se regeneran con python -m backtest download)
+backtest_data.db*

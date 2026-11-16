@@ -566,7 +566,8 @@ def execute_paper_trade(
             exit_price = yes_price if side == "YES" else no_price
             # Compras una posición a 'entry', ganas si su precio SUBE (sea YES o NO).
             # El precio de salida es el precio actual del MISMO lado que compraste.
-            pnl_usdc = (exit_price - entry) * size
+            # size está en USDC: compra size/entry shares, cada una vale exit_price.
+            pnl_usdc = (exit_price - entry) * size / entry if entry > 0 else 0
             pnl_pct  = pnl_usdc / size if size > 0 else 0
             outcome  = "win" if pnl_usdc > 0 else "loss"
 
@@ -722,7 +723,8 @@ def settle_resolved_positions(con) -> list:
 
         for tid, side, entry, size in open_trades:
             exit_price = yes_price if side == "YES" else no_price
-            pnl_usdc   = (exit_price - entry) * size
+            # size está en USDC: compra size/entry shares, cada una vale exit_price.
+            pnl_usdc   = (exit_price - entry) * size / entry if entry > 0 else 0
             pnl_pct    = pnl_usdc / size if size > 0 else 0
             outcome    = "win" if pnl_usdc > 0 else "loss"
 
