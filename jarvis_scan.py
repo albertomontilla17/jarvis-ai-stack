@@ -116,7 +116,7 @@ def scan(con, amount_usd: float) -> list[dict]:
         if ba is None:
             continue
         bid, ask = ba
-        if ask - bid > MAX_SPREAD or not (0.05 <= ask <= 0.95):
+        if ask - bid > MAX_SPREAD + 1e-9 or not (0.05 <= ask <= 0.95):
             print(f"   · descartado (spread {ask - bid:.3f}, ask {ask:.3f}): {m['question'][:60]}")
             continue
         fee = fee_per_share(ask, m["fee_rate"], m["fee_exp"])

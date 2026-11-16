@@ -114,6 +114,25 @@ Cada corrida guarda en `sports_log.db` el pronóstico previo a cada partido de N
 Los ajustes solo se aceptan antes del inicio. Criterio para pasar a dinero real: 200+ partidos
 terminados en los que el modelo ajustado tenga menor log-loss que el mercado y ROI con IC > 0.
 
+## Paper trading (`paper.py`)
+
+Convierte los registros de los escáneres en operaciones simuladas al precio real de compra
+(ask + comisión) previo al evento, con $1.000 ficticios y $20 por operación en cada estrategia:
+
+| Estrategia | Regla |
+|---|---|
+| `finanzas_reversion` | cada propuesta de `jarvis_scan.py` (Polymarket) |
+| `deportes_modelo` | modelo base, si su prob. supera el ask + comisión en 5+ puntos (Kalshi) |
+| `deportes_ajustado` | modelo ajustado por bajas, mismo umbral (Kalshi) |
+| `deportes_favorito` | control: siempre el favorito del mercado; mide el costo de operar sin ventaja |
+
+```bash
+python paper.py     # sincroniza operaciones y muestra PnL, ROI con IC 95% y caída máxima
+```
+
+Las decisiones deportivas se rehacen con cada nuevo precio hasta que empieza el partido; desde
+ese momento quedan congeladas.
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
