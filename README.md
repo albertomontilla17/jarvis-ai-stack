@@ -77,6 +77,31 @@ Por eso `jarvis_scan.py` registra el precio **real** de compra de cada señal y 
 con spread mayor a 4 centavos. Criterio para pasar a dinero real: al menos 100 propuestas
 resueltas con ROI positivo en `python jarvis_scan.py --settle`.
 
+## Analizador de stats deportivos (`sports/`) contra precios de Kalshi
+
+```bash
+python -m sports download     # resultados de ESPN + mercados de partido y bid/ask real de Kalshi
+python -m sports evaluate     # ¿el modelo de stats le gana al mercado?
+```
+
+| Archivo | Qué hace |
+|---|---|
+| `sports/data.py` | Baja resultados (ESPN, desde 2021) y los mercados "quién gana" de Kalshi con su bid/ask 30+ min antes del partido |
+| `sports/model.py` | Probabilidad de victoria a partir de Elo (con margen y ventaja de local), descanso y racha reciente |
+| `sports/evaluate.py` | Compara el modelo con el precio: precisión, si aporta información nueva y si gana dinero pagando ask + comisión |
+
+Resultado con partidos que el modelo no vio al ajustarse (abril 2025 – noviembre 2026):
+
+| Liga | Partidos | Log-loss modelo | Log-loss mercado | ¿Aporta sobre el precio? | ROI apostando con ventaja ≥ 5 pts |
+|---|---|---|---|---|---|
+| NFL | 429 | 0,635 | 0,611 | No (z = −0,1) | −0,8% (−17,6% a +17,0%) |
+| NBA | 1.588 | 0,603 | 0,575 | No (z = −0,6) | −13,2% (−22,2% a −3,7%) |
+| NHL | 1.805 | 0,684 | 0,672 | No (z = −2,0, en contra) | −14,5% (−23,1% a −5,8%) |
+
+El precio de Kalshi predice mejor que este modelo en las tres ligas, y el modelo no añade nada
+que el precio no contenga ya. Cuando el modelo "ve" una ventaja, casi siempre es porque le falta
+información que el mercado sí tiene (lesiones, alineaciones, descansos de estrellas).
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
