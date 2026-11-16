@@ -1,273 +1,89 @@
 # jarvis-ai-stack
 
-Personal AI agent stack built by Alberto Montilla — Applied AI student at Miami Dade College.
+Bot de mercados de predicción (Polymarket) de Alberto Montilla, reconstruido por piezas:
+primero se demuestra con datos que una estrategia gana, y solo después se le pone dinero.
 
-Jarvis is a personal AI assistant running on [OpenClaw](https://github.com/openclaw/openclaw), powered by Claude, connected to Telegram. This repo documents the tools, scripts, and integrations built on top of it.
+## Arquitectura
 
----
-
-## Stack Overview
-
-| Layer | Tool |
-|---|---|
-| AI Agent | OpenClaw + Claude Sonnet 4.6 |
-| Messaging | Telegram (@Alberto_Montilla_claw_bot) |
-| Prediction Markets | Polymarket via PolyClaw (Chainstack) |
-| Wallet | Coinbase Wallet (Polygon) — 42 USDC.e funded |
-| RPC | Chainstack Global Node (Polygon Mainnet) |
-| Payments | x402 protocol on Base (L2) — coming soon |
-| Infra | AWS / Amazon Bedrock — coming soon |
-| Hardware | Lenovo Legion (Windows) |
-
----
-
-## Modules
-
-### 🎯 `jarvis_polymarket.py`
-Fetches trending or keyword-searched Polymarket markets, analyzes them with Claude, and delivers a Spanish-language briefing directly to Telegram.
-
-**Features:**
-- Live market data via Polymarket Gamma API (no API key required)
-- Claude-powered analysis in Spanish — spots mispriced odds, high-volume signals, time-sensitive opportunities
-- Telegram delivery with automatic message chunking
-- CLI flags for trending, keyword search, raw data, and skipping Telegram
-- Automated daily runs via Windows Task Scheduler (12:00 PM)
-
-**Usage:**
-```bash
-python jarvis_polymarket.py                  # trending markets + Telegram
-python jarvis_polymarket.py --search "FIFA"  # search by keyword
-python jarvis_polymarket.py --raw            # raw data only
-python jarvis_polymarket.py --no-telegram    # skip Telegram
-python jarvis_polymarket.py --limit 10       # control market count
 ```
-
----
-
-### 🚨 `jarvis_alerts.py`
-Monitors 50 Polymarket markets every hour for sudden price movements. Sends an immediate Telegram alert when any market moves more than 15%.
-
-**Features:**
-- Monitors top 50 markets by volume
-- Stores price history locally in `market_prices.json`
-- Detects moves >15% and sends Spanish-language alert to Telegram
-- Automated hourly runs via Windows Task Scheduler
-
-**Usage:**
-```bash
-python jarvis_alerts.py
+ NUBE (sin claves, sin dinero)                    COMPUTADORA LOCAL (wallet)
+ ┌────────────────────────────┐   propuesta      ┌──────────────────────────────┐
+ │ jarvis_scan.py             │ ───────────────► │ jarvis_execute.py            │
+ │ tarea programada: busca    │   tú apruebas    │ valida límites duros propios │
+ │ señales y mide resultados  │                  │ firma y envía la orden       │
+ └────────────────────────────┘                  └──────────────────────────────┘
 ```
-
-**First run:** saves current prices (no alert sent)
-**Subsequent runs:** compares prices and alerts on anomalies
-
----
-
-### 🤖 `jarvis_trade.py`
-Autonomous trading module. Claude analyzes Polymarket opportunities and executes trades automatically via PolyClaw CLOB. Conservative by design — starts at $2/trade.
-
-**Features:**
-- Claude analyzes 20 markets and picks the best opportunity
-- Only trades when confidence >= 75%
-- Dry-run mode for testing without real money
-- Sends trade confirmation or "no opportunity" message to Telegram
-- Hard cap of $10 per trade
-
-**Usage:**
-```bash
-python jarvis_trade.py              # auto mode — Claude decides and trades
-python jarvis_trade.py --dry-run    # simulate only, no real trades
-python jarvis_trade.py --amount 5   # set trade size (default $2)
-python jarvis_trade.py --limit 30   # analyze more markets
-```
-
-**Environment variables required:**
-```bash
-ANTHROPIC_API_KEY
-TELEGRAM_TOKEN
-POLYCLAW_PRIVATE_KEY    # Coinbase Wallet private key
-CHAINSTACK_NODE         # Polygon RPC URL
-```
-
----
-
-### 🧠 `jarvis_paper_trade.py` — motor de paper trading (Kelly + debate)
-Motor de decisión unificado. Por cada mercado: detecta la fase (early/mid/late),
-corre un debate de 3 llamadas a Claude (investigador Bull, investigador Bear, y
-Risk-Manager con poder de veto), y dimensiona la posición con **Kelly Criterion
-fraccionado** (medio-Kelly). Guardrails forzados en código, no en el prompt:
-
-- `SKIP_LOW_CONFIDENCE` — confianza por debajo del umbral de la estrategia
-- `SKIP_NO_EDGE` — Kelly no ve edge (confidence <= precio de entrada) ⇒ no se apuesta
-- Techo duro `max_position` y guard de precio máximo de entrada (0.95)
-- Presupuesto compartido por evento (`--match-id`): todos los props de un mismo
-  partido/pelea comparten un solo límite — no se puede "diversificar" en 7
-  mercados correlacionados del mismo evento
-- **Liquidación automática** (`settle_resolved_positions`): al inicio de cada
-  ciclo revisa las posiciones abiertas contra la API de CLOB (que sí conserva
-  mercados resueltos, a diferencia de Gamma) y las cierra al precio final real
-
-```bash
-python jarvis_paper_trade.py --market <slug> --once --match-budget 15 --match-id <evento>
-```
-
-### 📡 `jarvis_market_selector.py` — selector de mercados en 2 etapas
-Decide QUÉ mercados vale la pena seguir, con justificación explícita.
-
-1. **Filtro duro en código** (sin costo de API): universo de Polymarket por
-   volumen 24h, filtrado por liquidez mínima, ventana de resolución de 2-30 días
-   y precio no decidido (0.05-0.95).
-2. **Selección razonada con Claude** (1 llamada/día, cacheada por fecha): elige
-   una watchlist diversificada (máx. 2 mercados por evento subyacente) y guarda
-   el porqué de cada elección y el tipo de edge esperado (`mispricing`,
-   `information`, `event-volatility`, `time-decay`) en la tabla `watchlist` —
-   así después se puede evaluar no solo los trades sino las selecciones.
-
-```bash
-python jarvis_market_selector.py            # watchlist de hoy (crea si no existe)
-python jarvis_market_selector.py --refresh  # forzar nueva selección
-python jarvis_market_selector.py --dry-run  # solo candidatos, sin Claude
-```
-
-### 🔁 `jarvis_paper_runner.py` — orquestador para Task Scheduler
-Cada ciclo: liquida posiciones resueltas → obtiene la watchlist del día →
-expande cada mercado/evento en sus sub-mercados → corre el motor sobre cada uno
-con presupuesto por evento → manda resumen consolidado a Telegram (incluye las
-justificaciones de la watchlist el día que la selección es nueva).
-
-### 🧪 `backtest/` — backtester (antes de poner dinero real)
-Responde con datos históricos a la pregunta "¿esta estrategia habría ganado dinero después de costos?".
-Construido por piezas independientes, cada una probada por separado:
 
 | Pieza | Archivo | Qué hace |
 |---|---|---|
-| 1. Datos | `backtest/data.py` | Baja mercados **resueltos** y su historial horario de precios a `backtest_data.db` (sin API key) |
-| 2. Simulador | `backtest/engine.py` | Reproduce cada mercado barra a barra, sin lookahead, con spread + comisiones, PnL en shares |
-| 3. Estrategias | `backtest/strategies.py` | Reglas base sin LLM (favorito, longshot, momentum, reversión) + control aleatorio |
+| 1. Datos | `backtest/data.py` | Baja mercados **resueltos** y su historial horario a `backtest_data.db` (sin API key) |
+| 2. Simulador | `backtest/engine.py` | Reproduce cada mercado barra a barra, sin ver el futuro, con spread y comisiones |
+| 3. Estrategias | `backtest/strategies.py` | Reglas base (favorito, longshot, momentum, reversión) y un control aleatorio |
 | 4. Métricas | `backtest/report.py` | ROI por $ apostado con IC 95% (bootstrap por evento), dentro/fuera de muestra, calibración |
+| 5. Escáner | `jarvis_scan.py` | Aplica la estrategia a mercados en vivo, genera propuestas y mide el resultado real hacia adelante |
+| 6. Ejecutor | `jarvis_execute.py` | En la computadora local: valida límites y ejecuta la propuesta aprobada. Simula por defecto |
+
+## Uso
 
 ```bash
+pip install -r requirements.txt
+
+# Backtest
 python -m backtest download --from 2026-06-01 --to 2026-11-01 --sample 5000
-python -m backtest calibration        # ¿el precio ya es una buena probabilidad?
-python -m backtest run                # estrategias base, con y sin datos fuera de muestra
-python -m unittest discover tests     # tests del simulador
+python -m backtest prices --categories finance_prices economics --sample 2000
+python -m backtest calibration --category sports
+python -m backtest run --category finance_prices economics
+
+# En vivo (sin dinero)
+python jarvis_scan.py              # genera proposals/<id>.json
+python jarvis_scan.py --settle     # resultado acumulado de las propuestas ya resueltas
+
+# Computadora local
+python jarvis_execute.py --order proposals/<id>.json          # simulación
+python jarvis_execute.py --order proposals/<id>.json --live   # orden real
+python jarvis_execute.py --status
+
+# Tests
+python -m unittest discover tests
 ```
 
-Una estrategia nueva es cualquier función `f(view) -> Signal | None` (ver `strategies.py`).
-Criterio para considerar dinero real: límite inferior del IC 95% > 0 **fuera de muestra**.
+## Claves
 
----
+Copia `.env.example` a `.env` **solo en la computadora local** y rellena los valores marcados
+con `REEMPLAZA`. El escáner y el backtest no necesitan ninguna clave.
 
-### 🔑 `setup_polymarket_creds.py`
-Generates Polymarket CLOB API credentials (apiKey, secret, passphrase) from your wallet private key. Run once to set up trading access.
+## Resultados del backtest (mercados resueltos jun–oct 2026, volumen ≥ $50k)
 
-**Usage:**
-```bash
-$env:POLYGON_PRIVATE_KEY="0x..."
-$env:POLYGON_ADDRESS="0x2eEeaeE3F360c70Db75FB1d36ac8b9b97c58a675"
-python setup_polymarket_creds.py
-```
+Costos asumidos: 1 centavo de medio spread + la comisión de cada mercado.
 
----
+**Deportes (6.480 mercados): ninguna estrategia gana.** Todas pierden entre 5% y 22% por dólar
+apostado, también fuera de muestra. El control aleatorio pierde 5%, que es el costo de operar.
 
-## Setup
+**Finanzas y economía (756 mercados): una pista, no una prueba.**
 
-### 1. Clone this repo
-```bash
-git clone https://github.com/albertomontilla17/jarvis-ai-stack.git
-cd jarvis-ai-stack
-```
+| Estrategia | Trades | ROI por $ | IC 95% |
+|---|---|---|---|
+| Reversión 10 pts / 6 h | 495 | +15,9% | +2,6% a +29,3% |
+| Momentum 10 pts / 6 h | 496 | −11,7% | −20,1% a −2,7% |
+| Favorito 80–95 | 267 | −4,5% | −10,4% a +0,9% |
 
-### 2. Install dependencies
-```bash
-pip install anthropic requests py-clob-client-v2
-```
+La reversión (apostar contra un movimiento brusco de 10 puntos en 6 horas) da ~+16% en las dos
+mitades del periodo y se mantiene positiva con otros parámetros (5/10/15 puntos, 3/6/12 horas).
+Pero depende del spread real: con 3 centavos de medio spread baja a +9% y el intervalo ya incluye
+el cero; con 5 centavos queda en +4%. El historial solo trae precio medio, no el libro de órdenes,
+así que el backtest no puede resolver esa duda.
 
-### 3. Install OpenClaw + clawhub
-```bash
-npm install -g openclaw clawhub
-```
+Por eso `jarvis_scan.py` registra el precio **real** de compra de cada señal y descarta mercados
+con spread mayor a 4 centavos. Criterio para pasar a dinero real: al menos 100 propuestas
+resueltas con ROI positivo en `python jarvis_scan.py --settle`.
 
-### 4. Install PolyClaw (Chainstack)
-```bash
-cd %USERPROFILE%\.openclaw\workspace\skills
-git clone https://github.com/chainstacklabs/polyclaw polyclaw-chainstack
-cd polyclaw-chainstack
-uv sync
-```
+## Límites del ejecutor
 
-### 5. Get a Chainstack RPC node
-Sign up at [chainstack.com](https://chainstack.com), create a Polygon Mainnet Global Node, and copy the HTTPS endpoint.
+Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
+máximo por trade, máximo diario, categorías permitidas, tolerancia de precio, caducidad de la
+propuesta y una sola ejecución por propuesta. Las órdenes son de compra, tipo FOK con precio tope.
 
-### 6. Set environment variables
-Create your `.bat` files with:
-```bat
-@echo off
-set ANTHROPIC_API_KEY=your-key
-set TELEGRAM_TOKEN=your-token
-set POLYCLAW_PRIVATE_KEY=0x...
-set CHAINSTACK_NODE=https://polygon-mainnet.core.chainstack.com/...
-set POLYGON_ADDRESS=0x...
-cd C:\path\to\jarvis-ai-stack
-python jarvis_polymarket.py
-```
+## Aviso
 
-### 7. Approve Polymarket contracts (one-time)
-```bash
-cd %USERPROFILE%\.openclaw\workspace\skills\polyclaw-chainstack
-uv run python scripts/polyclaw.py wallet approve
-```
-
-### 8. Automate with Windows Task Scheduler
-- Daily briefing: 12:00 PM → `run_jarvis_polymarket.bat`
-- Hourly alerts: every 1 hour → `run_jarvis_alerts.bat`
-
----
-
-## Roadmap
-
-- [x] Polymarket data via Gamma API
-- [x] Claude-powered market analysis in Spanish
-- [x] Telegram delivery
-- [x] Windows Task Scheduler — daily briefing at 12:00 PM
-- [x] Anomaly alerts — hourly monitoring of 50 markets
-- [x] Autonomous trading module with dry-run mode
-- [x] Wallet funded — 42 USDC.e on Polygon
-- [x] CLOB credentials generated
-- [x] Chainstack RPC node configured
-- [x] GitHub repo with local git workflow
-- [x] Liquidación automática de posiciones al resolverse el mercado (vía CLOB API)
-- [x] Kelly Criterion (medio-Kelly) para position sizing
-- [x] Debate Bull / Bear / Risk-Manager (3 llamadas a Claude por decisión, con veto)
-- [x] Selector de mercados en 2 etapas con watchlist diversificada y justificada
-- [x] Presupuesto compartido por evento (props correlacionados no multiplican exposición)
-- [x] Backtest contra mercados resueltos reales (muestra preliminar: 3 entradas en
-      ~185 decisiones, direccionales correctas; Kelly vetó sistemáticamente entradas
-      sin edge — vs. -$17.11 y 33% win rate del motor simple anterior)
-- [ ] Completar backtest ampliado (~6 mercados pendientes)
-- [ ] Wallet approve — pending (nonce reset needed)
-- [ ] First live trade execution
-- [ ] x402 integration — expose analysis as a paid API endpoint
-- [ ] Amazon Bedrock AgentCore — migrate Jarvis to AWS
-
-> **Estado (julio 2026):** proyecto en pausa — las 3 tareas de Task Scheduler
-> están deshabilitadas. La infraestructura queda funcional; para retomar:
-> recargar créditos de la API de Anthropic y re-habilitar las tareas.
-
----
-
-## Notes
-
-- Polymarket Gamma API is fully public — no auth required for read access
-- Trading requires USDC.e on Polygon + POL for gas + Chainstack RPC
-- Polymarket browser trading is restricted in USA — use PolyClaw CLI instead
-- Never commit private keys or `.bat` files to GitHub
-- All scripts are for research and educational purposes
-
----
-
-## Author
-
-Alberto Montilla — Miami, FL
-Applied AI @ Miami Dade College
-Building at the intersection of AI agents, prediction markets, and Web3 payments.
+Operar solo en una plataforma en la que tengas permitido operar desde tu país de residencia.
+Nada de esto es asesoría financiera; el backtest describe el pasado, no garantiza el futuro.
