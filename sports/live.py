@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS forecasts (
 def connect(path: str = LOG_PATH) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(forecasts)")}
+    for col in ("home_ticker", "away_ticker"):   # migración: tickers de Kalshi para ejecutar
+        if col not in cols:
+            con.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT")
     return con
 
 
@@ -74,7 +78,7 @@ def injuries(league: str) -> dict[str, list]:
 
 
 def kalshi_quotes(con, league: str) -> dict[str, list]:
-    """{abreviatura ESPN: [(bid, ask, hora prevista de fin), ...]} de los mercados abiertos."""
+    """{abreviatura ESPN: [(bid, ask, hora prevista de fin, ticker), ...]} de los mercados abiertos."""
     lookup = data.team_lookup(con, league)
     abbrs = {r[0] for r in con.execute("SELECT abbr FROM teams WHERE league = ?", (league,))}
     out, cursor = {}, ""
@@ -94,7 +98,7 @@ def kalshi_quotes(con, league: str) -> dict[str, list]:
             except (KeyError, TypeError, ValueError):
                 continue
             if team and 0 < bid < ask < 1:
-                out.setdefault(team, []).append((bid, ask, end))
+                out.setdefault(team, []).append((bid, ask, end, m["ticker"]))
         cursor = d.get("cursor")
         if not cursor or not d.get("markets"):
             return out
@@ -103,9 +107,17 @@ def kalshi_quotes(con, league: str) -> dict[str, list]:
 def _quote_for(quotes: dict, g: model.Game) -> tuple[float, float] | None:
     """Bid/ask del LOCAL para este partido (usa el mercado de la visita si hace falta)."""
     for team, flip in ((g.home, False), (g.away, True)):
-        for bid, ask, end in quotes.get(team, []):
+        for bid, ask, end, _ in quotes.get(team, []):
             if g.ts < end <= g.ts + 8 * 3600:
                 return (1 - ask, 1 - bid) if flip else (bid, ask)
+    return None
+
+
+def _ticker_for(quotes: dict, team: str, start_ts: int) -> str | None:
+    """Ticker del mercado "gana <team>" de este partido."""
+    for _, _, end, ticker in quotes.get(team, []):
+        if start_ts < end <= start_ts + 8 * 3600:
+            return ticker
     return None
 
 
@@ -136,6 +148,8 @@ def snapshot(stats_con, log_con, leagues: list[str], horizon_h: float = 3.0, now
                 " injuries = excluded.injuries",
                 (g.gid, lg, g.ts, g.home, g.away, now, probs[g.gid], q[0], q[1],
                  json.dumps(gi, ensure_ascii=False)))
+            log_con.execute("UPDATE forecasts SET home_ticker = ?, away_ticker = ? WHERE gid = ?",
+                            (_ticker_for(quotes, g.home, g.ts), _ticker_for(quotes, g.away, g.ts), g.gid))
             rows.append({"gid": g.gid, "league": lg, "start_ts": g.ts, "home": g.home, "away": g.away,
                          "p_model": probs[g.gid], "home_bid": q[0], "home_ask": q[1], "injuries": gi})
     log_con.commit()

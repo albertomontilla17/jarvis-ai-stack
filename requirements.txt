@@ -1,5 +1,6 @@
 requests
 numpy
 python-dotenv
-# Solo en la computadora que ejecuta trades reales:
-py-clob-client
+# Solo en la computadora que ejecuta órdenes reales:
+cryptography      # firma de órdenes de Kalshi
+py-clob-client    # solo si se usa Polymarket

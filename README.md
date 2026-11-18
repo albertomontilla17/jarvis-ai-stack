@@ -133,6 +133,25 @@ python paper.py     # sincroniza operaciones y muestra PnL, ROI con IC 95% y ca�
 Las decisiones deportivas se rehacen con cada nuevo precio hasta que empieza el partido; desde
 ese momento quedan congeladas.
 
+## Ejecución en Kalshi (`jarvis_kalshi.py`)
+
+Flujo: el paper trading decide → `python -m sports propose` escribe la propuesta → tú la apruebas →
+tu computadora la ejecuta con `jarvis_kalshi.py`, que vuelve a validarla contra el libro real.
+
+```bash
+python -m sports propose --amount 1                        # propuestas del modelo ajustado → proposals/kalshi/
+python jarvis_kalshi.py --check                            # verifica tu clave (muestra el saldo, solo lectura)
+python jarvis_kalshi.py --order proposals/kalshi/X.json    # simulación: muestra la orden exacta, no envía nada
+python jarvis_kalshi.py --order proposals/kalshi/X.json --live   # orden real
+```
+
+- Solo compra "Sí" en el mercado del equipo elegido, con orden todo-o-nada (fill-or-kill) y precio tope.
+- Antes de enviar comprueba: liga permitida, monto por orden y por día, que el partido no haya empezado,
+  que el precio no se haya movido más que la tolerancia, que la ventaja del modelo siga en pie y que la
+  propuesta no se haya ejecutado ya.
+- `KALSHI_ENV=demo` usa el entorno de prueba de Kalshi (dinero ficticio). Pasa a `prod` solo después.
+- Firma y formato verificados contra el SDK oficial `kalshi_python_sync` 3.36.
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:

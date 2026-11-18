@@ -8,13 +8,15 @@ CLI del analizador deportivo.
     python -m sports live                # registrar pronósticos de los partidos próximos
     python -m sports adjust <gid> 0.62 "motivo"   # probabilidad ajustada del local
     python -m sports results             # mercado vs modelo vs modelo ajustado, en vivo
+    python -m sports propose --amount 1  # propuestas de orden para Kalshi (proposals/kalshi/)
 """
 
+import os
 import argparse
 
 import datetime as dt
 
-from . import LEAGUES, data, evaluate, live
+from . import LEAGUES, data, evaluate, live, propose
 
 LIVE = ["nba", "nhl", "nfl"]
 
@@ -63,6 +65,18 @@ def cmd_results(a):
     live.results(log)
 
 
+def cmd_propose(a):
+    here = propose.HERE
+    props = propose.build(os.path.join(here, "paper.db"), os.path.join(here, live.LOG_PATH),
+                          a.strategy, a.amount)
+    if not props:
+        print(f"⏸️  Sin propuestas: no hay operaciones abiertas de {a.strategy} antes del partido.")
+        return
+    for p, path in zip(props, propose.write(props)):
+        print(f"💡 {p['question']} | Sí en {p['ticker']} a ≤ {p['price']:.2f} | ${p['amount_usd']:.2f}"
+              f" | modelo {p['prob']:.0%}\n   python jarvis_kalshi.py --order {os.path.relpath(path, here)}")
+
+
 def main():
     p = argparse.ArgumentParser(prog="sports", description="Analizador de stats deportivos de Jarvis")
     p.add_argument("--db", default=data.DB_PATH)
@@ -82,6 +96,10 @@ def main():
     ad.add_argument("note")
     ad.set_defaults(fn=cmd_adjust)
     sub.add_parser("results").set_defaults(fn=cmd_results)
+    pp = sub.add_parser("propose")
+    pp.add_argument("--strategy", default="deportes_ajustado")
+    pp.add_argument("--amount", type=float, default=1.0, help="USD por propuesta")
+    pp.set_defaults(fn=cmd_propose)
     a = p.parse_args()
     a.fn(a)
 
