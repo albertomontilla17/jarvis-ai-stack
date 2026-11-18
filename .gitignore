@@ -18,3 +18,4 @@ __pycache__/
 .venv/
 venv/
 sports_data.db*
+weather_data.db*
