@@ -93,6 +93,24 @@ class ValidateTest(unittest.TestCase):
         with self.assertRaises(Rejected):    # 4.94 gastado + 5 > 6
             kx.execute(order(id="b"), live=False, cfg=CFG, con=self.con, ask=0.61)
 
+    def test_simulating_first_does_not_block_recording_the_real_order(self):
+        kx.execute(order(id="s"), live=False, cfg=CFG, con=self.con, ask=0.61)
+        self.con.execute("INSERT INTO executions VALUES ('s', 't', 'd', 'q', 'x', 1, 0.6, 1, '{}')")
+        with self.assertRaises(Rejected):   # y la real ya registrada bloquea repetirla
+            kx.validate(order(id="s"), CFG, self.con, True, 0.61)
+
+    def test_old_ledger_is_migrated(self):
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.execute("CREATE TABLE executions (order_id TEXT PRIMARY KEY, ts TEXT, day TEXT, question TEXT,"
+                    " side TEXT, amount_usd REAL, limit_price REAL, live INTEGER, response TEXT)")
+        old.execute("INSERT INTO executions VALUES ('a', 't', 'd', 'q', 'x', 1, 0.5, 0, '{}')")
+        old.commit()
+        old.close()
+        con = ledger(path)
+        con.execute("INSERT INTO executions VALUES ('a', 't', 'd', 'q', 'x', 1, 0.5, 1, '{}')")
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM executions").fetchone()[0], 2)
+
     def test_live_without_key_is_rejected_and_not_recorded(self):
         with self.assertRaises(Rejected):
             kx.execute(order(), live=True, cfg=CFG, con=self.con, ask=0.61,

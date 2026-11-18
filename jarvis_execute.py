@@ -55,9 +55,22 @@ def limits() -> dict:
 
 def ledger(path: str = LEDGER) -> sqlite3.Connection:
     con = sqlite3.connect(path)
+    # Clave (order_id, live): simular una propuesta no debe impedir registrar después
+    # su ejecución real; si no, la orden real quedaría sin registro y podría repetirse.
     con.execute("""CREATE TABLE IF NOT EXISTS executions (
-        order_id TEXT PRIMARY KEY, ts TEXT, day TEXT, question TEXT, side TEXT,
-        amount_usd REAL, limit_price REAL, live INTEGER, response TEXT)""")
+        order_id TEXT, ts TEXT, day TEXT, question TEXT, side TEXT,
+        amount_usd REAL, limit_price REAL, live INTEGER, response TEXT,
+        PRIMARY KEY (order_id, live))""")
+    pk = [r[1] for r in con.execute("PRAGMA table_info(executions)") if r[5]]
+    if pk == ["order_id"]:   # migrar la tabla antigua, que tenía solo order_id como clave
+        con.executescript("""
+            ALTER TABLE executions RENAME TO executions_old;
+            CREATE TABLE executions (
+                order_id TEXT, ts TEXT, day TEXT, question TEXT, side TEXT,
+                amount_usd REAL, limit_price REAL, live INTEGER, response TEXT,
+                PRIMARY KEY (order_id, live));
+            INSERT INTO executions SELECT * FROM executions_old;
+            DROP TABLE executions_old;""")
     return con
 
 
