@@ -170,6 +170,24 @@ Resultado fuera de muestra (julio–noviembre 2026, 7 ciudades): el mercado pred
 | Día anterior, 15Z | 769 | 1,50 | 1,21 | −24,8% (−34,2% a −13,9%) |
 | Mismo día, 15Z | 852 | 1,37 | 0,95 | −16,9% (−25,4% a −7,7%) |
 
+## Bot de market making (`jarvis_mm.py`)
+
+Deja una compra y una venta de "Sí" al mejor precio del libro en cada mercado elegido, para cobrar el
+spread y los incentivos de liquidez de Kalshi. Siempre post-only (nunca cruza el libro).
+
+```bash
+python jarvis_mm.py --markets TICKER1 TICKER2 --dry-run          # qué cotizaría, sin órdenes
+python jarvis_mm.py --markets TICKER1 --size 5 --minutes 30      # opera (demo por defecto)
+python jarvis_mm.py --cancel-all                                 # cancela todo lo abierto
+python jarvis_mm.py --report                                     # llenados, posición y PnL
+```
+
+- Excluye sus propias órdenes al leer el libro, para no perseguirse a sí mismo.
+- Spread de 1–2 centavos: se une al mejor precio; más ancho: mejora 1 centavo por lado sin cruzar.
+- Inventario limitado a ±`max_pos` contratos; deja de comprar o vender al llegar al tope.
+- Si el punto medio salta `jump` (5 centavos por defecto) entre vueltas, cancela y pausa ese mercado.
+- Al terminar, o ante cualquier error, cancela todas sus órdenes. En `prod` exige `--allow-prod`.
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
