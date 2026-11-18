@@ -51,7 +51,7 @@ class EvaluateTest(unittest.TestCase):
 class TeamLookupTest(unittest.TestCase):
     def test_kalshi_names_map_to_espn_abbreviations(self):
         con = data.connect(":memory:")
-        con.executemany("INSERT INTO teams VALUES ('x', ?, ?, ?)", [
+        con.executemany("INSERT INTO teams (league, abbr, location, name) VALUES ('x', ?, ?, ?)", [
             ("LAL", "Los Angeles", "Lakers"), ("LAC", "Los Angeles", "Clippers"),
             ("SAC", "Sacramento", "Kings"), ("CHW", "Chicago", "White Sox"), ("CHC", "Chicago", "Cubs")])
         lk = data.team_lookup(con, "x")
@@ -59,6 +59,26 @@ class TeamLookupTest(unittest.TestCase):
                            ("Chicago WS", "CHW"), ("Chicago C", "CHC"), ("SAC Kings", "SAC")):
             self.assertEqual(lk.get(data._norm(name)), abbr, name)
         self.assertNotIn("los angeles", lk)   # ciudad ambigua: no se adivina
+
+    def test_college_names(self):
+        con = data.connect(":memory:")
+        con.executemany("INSERT INTO teams VALUES ('ncaamb', ?, ?, ?, ?)", [
+            ("WSU", "Washington State", "Cougars", "Washington St"), ("WASH", "Washington", "Huskies", "Washington"),
+            ("UNLV", "UNLV", "Rebels", "UNLV"), ("MIA", "Miami", "Hurricanes", "Miami"),
+            ("M-OH", "Miami (OH)", "RedHawks", "Miami OH"), ("MIZ", "Miami", "X", "Miami")])
+        lk = data.team_lookup(con, "ncaamb")
+        for name, abbr in (("Washington St.", "WSU"), ("Washington State", "WSU"), ("Washington", "WASH"),
+                           ("UNLV", "UNLV"), ("Miami (OH)", "M-OH")):
+            self.assertEqual(lk.get(data._norm(name)), abbr, name)
+        self.assertNotIn("miami", lk)          # dos equipos con el mismo nombre: no se adivina
+
+
+class NeutralTest(unittest.TestCase):
+    def test_neutral_site_has_no_home_advantage(self):
+        gs = [model.Game("a", 0, 2026, "A", "B", 0, 0, 1), model.Game("b", 1, 2026, "A", "B", 0, 0, 0)]
+        X = model.features(gs, 20, 100, 10, 10.0)
+        self.assertEqual(X[0, 0], 0.0)
+        self.assertAlmostEqual(X[1, 0], 100 / 400)   # mismo duelo con local: +100 Elo
 
 
 if __name__ == "__main__":

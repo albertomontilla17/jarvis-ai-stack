@@ -13,4 +13,8 @@ LEAGUES = {
     "nhl": {"espn": "hockey/nhl", "kalshi": "KXNHLGAME"},
     "nfl": {"espn": "football/nfl", "kalshi": "KXNFLGAME"},
     "mlb": {"espn": "baseball/mlb", "kalshi": "KXMLBGAME"},
+    # Baloncesto universitario masculino, División I. ESPN corta en 1.000 partidos por
+    # consulta, así que se pide día a día; groups=50 = toda la División I.
+    "ncaamb": {"espn": "basketball/mens-college-basketball", "kalshi": "KXNCAAMBGAME",
+               "daily": True, "params": {"groups": "50"}, "season_months": (11, 12, 1, 2, 3, 4)},
 }

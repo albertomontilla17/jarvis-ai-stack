@@ -97,6 +97,7 @@ Resultado con partidos que el modelo no vio al ajustarse (abril 2025 – noviemb
 | NFL | 429 | 0,635 | 0,611 | No (z = −0,1) | −0,8% (−17,6% a +17,0%) |
 | NBA | 1.588 | 0,603 | 0,575 | No (z = −0,6) | −13,2% (−22,2% a −3,7%) |
 | NHL | 1.805 | 0,684 | 0,672 | No (z = −2,0, en contra) | −14,5% (−23,1% a −5,8%) |
+| Universitario (NCAAMB) | 5.754 | 0,554 | 0,500 | No (z = −1,0) | −12,4% (−17,8% a −6,8%) |
 
 El precio de Kalshi predice mejor que este modelo en las tres ligas, y el modelo no añade nada
 que el precio no contenga ya. Cuando el modelo "ve" una ventaja, casi siempre es porque le falta

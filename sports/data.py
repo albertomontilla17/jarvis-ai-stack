@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS kalshi (
 def connect(path: str = DB_PATH) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
+    for table, col, typ in (("games", "neutral", "INTEGER DEFAULT 0"), ("teams", "short", "TEXT")):
+        if col not in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")   # migración no destructiva
     return con
 
 
@@ -63,37 +66,71 @@ def _ts(s: str) -> int:
 
 
 # ── ESPN ──────────────────────────────────────────────────────────────────────
-def download_games(con, league: str, first_month: str) -> int:
-    """Baja todos los partidos terminados desde first_month (AAAAMM) hasta hoy."""
+def _date_keys(league: str, first_month: str):
+    """Claves de fecha para el scoreboard de ESPN: por mes, o por día en ligas muy grandes."""
+    cfg = LEAGUES[league]
     y, m = int(first_month[:4]), int(first_month[4:])
     today = dt.date.today()
+    if not cfg.get("daily"):
+        while (y, m) <= (today.year, today.month):
+            yield f"{y}{m:02d}"
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        return
+    day = dt.date(y, m, 1)
+    while day <= today:
+        if day.month in cfg.get("season_months", range(1, 13)):
+            yield day.strftime("%Y%m%d")
+        day += dt.timedelta(days=1)
+
+
+def parse_event(league: str, e: dict) -> dict | None:
+    """Un partido de ESPN → dict con local, visita, neutral y marcador (None si no sirve)."""
+    c = e["competitions"][0]
+    side = {t["homeAway"]: t for t in c["competitors"]}
+    if set(side) != {"home", "away"}:
+        return None
+    teams = [(t["team"]["abbreviation"], t["team"].get("location", ""), t["team"].get("name", ""),
+              t["team"].get("shortDisplayName", "")) for t in side.values()]
+    out = {"gid": f"{league}-{e['id']}", "ts": _ts(e["date"]), "season": int(e["season"]["year"]),
+           "stype": int(e.get("season", {}).get("type", 0)), "home": side["home"]["team"]["abbreviation"],
+           "away": side["away"]["team"]["abbreviation"], "neutral": int(bool(c.get("neutralSite"))),
+           "completed": bool(e["status"]["type"].get("completed")), "teams": teams,
+           "state": e["status"]["type"].get("state")}
+    try:
+        out["home_score"], out["away_score"] = int(side["home"]["score"]), int(side["away"]["score"])
+    except (KeyError, ValueError, TypeError):
+        out["home_score"] = out["away_score"] = None
+    return out
+
+
+def download_games(con, league: str, first_month: str, workers: int = 6) -> int:
+    """Baja todos los partidos terminados desde first_month (AAAAMM) hasta hoy."""
+    url = f"{ESPN}/{LEAGUES[league]['espn']}/scoreboard"
+    extra = LEAGUES[league].get("params", {})
+
+    def fetch(key):
+        try:
+            return _get(url, {"dates": key, "limit": 1000, **extra}).get("events", [])
+        except RuntimeError:
+            return []
+
     n = 0
-    while (y, m) <= (today.year, today.month):
-        d = _get(f"{ESPN}/{LEAGUES[league]['espn']}/scoreboard",
-                 {"dates": f"{y}{m:02d}", "limit": 1000})
-        for e in d.get("events", []):
-            c = e["competitions"][0]
-            stype = int(e.get("season", {}).get("type", 0))
-            if not e["status"]["type"].get("completed") or stype not in (2, 3):
-                continue   # solo temporada regular y playoffs, ya terminados
-            side = {t["homeAway"]: t for t in c["competitors"]}
-            if set(side) != {"home", "away"}:
-                continue
-            try:
-                hs, as_ = int(side["home"]["score"]), int(side["away"]["score"])
-            except (KeyError, ValueError, TypeError):
-                continue
-            for t in side.values():
-                tm = t["team"]
-                con.execute("INSERT OR REPLACE INTO teams VALUES (?, ?, ?, ?)",
-                            (league, tm["abbreviation"], tm.get("location", ""), tm.get("name", "")))
-            con.execute("INSERT OR REPLACE INTO games VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (f"{league}-{e['id']}", league, _ts(e["date"]), int(e["season"]["year"]), stype,
-                         side["home"]["team"]["abbreviation"], side["away"]["team"]["abbreviation"],
-                         hs, as_))
-            n += 1
-        con.commit()
-        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    with ThreadPoolExecutor(workers) as ex:
+        for events in ex.map(fetch, list(_date_keys(league, first_month))):
+            for e in events:
+                g = parse_event(league, e)
+                # solo temporada regular y postemporada, ya terminados
+                if not g or not g["completed"] or g["stype"] not in (2, 3) or g["home_score"] is None:
+                    continue
+                for abbr, loc, name, short in g["teams"]:
+                    con.execute("INSERT OR REPLACE INTO teams (league, abbr, location, name, short)"
+                                " VALUES (?, ?, ?, ?, ?)", (league, abbr, loc, name, short))
+                con.execute("INSERT OR REPLACE INTO games (gid, league, ts, season, stype, home, away,"
+                            " home_score, away_score, neutral) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (g["gid"], league, g["ts"], g["season"], g["stype"], g["home"], g["away"],
+                             g["home_score"], g["away_score"], g["neutral"]))
+                n += 1
+            con.commit()
     return n
 
 
@@ -120,7 +157,28 @@ def team_lookup(con, league: str) -> dict[str, str]:
         if len(abbrs) == 1:
             out[loc] = abbrs[0]
     out.setdefault("as", out.get("athletics", ""))
+    if LEAGUES.get(league, {}).get("daily"):
+        return _college_lookup(con, league)
     return out
+
+
+def _college_lookup(con, league: str) -> dict[str, str]:
+    """
+    Universidades: Kalshi usa el nombre corto ("Washington St.", "UNLV", "Duke").
+    Se prueban nombre corto, ubicación, abreviatura y la variante State↔St; un nombre
+    que apunta a dos equipos distintos se descarta en vez de adivinar.
+    """
+    cands: dict[str, set] = {}
+    rows = con.execute("SELECT abbr, location, name, COALESCE(short, '') FROM teams WHERE league = ?",
+                       (league,)).fetchall()
+    for abbr, loc, name, short in rows:
+        for c in {loc, short, abbr, f"{loc} {name}"}:
+            k = _norm(c)
+            if not k:
+                continue
+            for v in {k, re.sub(r"\bstate\b", "st", k), re.sub(r"\bst\b", "state", k)}:
+                cands.setdefault(v, set()).add(abbr)
+    return {k: next(iter(v)) for k, v in cands.items() if len(v) == 1}
 
 
 # ── Kalshi ────────────────────────────────────────────────────────────────────

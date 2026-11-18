@@ -20,7 +20,7 @@ from . import LEAGUES, data, evaluate, live, propose
 
 LIVE = ["nba", "nhl", "nfl"]
 
-FIRST_MONTH = {"nba": "202110", "nhl": "202110", "nfl": "202109", "mlb": "202104"}
+FIRST_MONTH = {"nba": "202110", "nhl": "202110", "nfl": "202109", "mlb": "202104", "ncaamb": "202111"}
 
 
 def cmd_download(a):

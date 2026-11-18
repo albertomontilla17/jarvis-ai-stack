@@ -16,10 +16,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-CARRY = 0.75          # cuánto Elo se conserva de una temporada a la siguiente
+CARRY = {"ncaamb": 0.6}   # cuánto Elo se conserva entre temporadas (0.75 por defecto;
+                          # en universidades cambia más la plantilla)
 FORM_N = {"nfl": 5}   # partidos de racha (10 por defecto)
-K_GRID = {"nba": (10, 15, 20, 25), "nhl": (4, 6, 8, 10), "nfl": (15, 20, 25, 30), "mlb": (2, 3, 4, 6)}
-HFA_GRID = (0, 20, 40, 60, 80, 100)
+K_GRID = {"nba": (10, 15, 20, 25), "nhl": (4, 6, 8, 10), "nfl": (15, 20, 25, 30), "mlb": (2, 3, 4, 6),
+          "ncaamb": (15, 20, 30, 40)}
+HFA_GRID = (0, 20, 40, 60, 80, 100, 120, 140)
 
 
 @dataclass
@@ -31,11 +33,12 @@ class Game:
     away: str
     home_score: int
     away_score: int
+    neutral: int = 0      # cancha neutral: sin ventaja de local
 
 
 def load_games(con, league: str) -> list[Game]:
     rows = con.execute(
-        "SELECT gid, ts, season, home, away, home_score, away_score FROM games"
+        "SELECT gid, ts, season, home, away, home_score, away_score, COALESCE(neutral, 0) FROM games"
         " WHERE league = ? AND home_score != away_score ORDER BY ts, gid", (league,)).fetchall()
     return [Game(*r) for r in rows]
 
@@ -44,7 +47,8 @@ def expected(diff: float) -> float:
     return 1.0 / (1.0 + 10 ** (-diff / 400.0))
 
 
-def features(games: list[Game], k: float, hfa: float, form_n: int, mov_norm: float) -> np.ndarray:
+def features(games: list[Game], k: float, hfa: float, form_n: int, mov_norm: float,
+             carry: float = 0.75) -> np.ndarray:
     """Una fila por partido: [elo_diff/400, descanso_local - descanso_visita, racha_local - racha_visita]."""
     elo = defaultdict(lambda: 1500.0)
     last_ts, last_season = {}, {}
@@ -53,9 +57,9 @@ def features(games: list[Game], k: float, hfa: float, form_n: int, mov_norm: flo
     for i, g in enumerate(games):
         for t in (g.home, g.away):
             if last_season.get(t, g.season) != g.season:
-                elo[t] = CARRY * elo[t] + (1 - CARRY) * 1500.0
+                elo[t] = carry * elo[t] + (1 - carry) * 1500.0
             last_season[t] = g.season
-        diff = elo[g.home] + hfa - elo[g.away]
+        diff = elo[g.home] + (0 if g.neutral else hfa) - elo[g.away]
         rest = [min((g.ts - last_ts[t]) / 86400, 4.0) if t in last_ts else 4.0 for t in (g.home, g.away)]
         frm = [float(np.mean(form[t])) if form[t] else 0.0 for t in (g.home, g.away)]
         X[i] = (diff / 400.0, rest[0] - rest[1], (frm[0] - frm[1]) / mov_norm)
@@ -129,7 +133,7 @@ def fit(con, league: str, cutoff_ts: int, upcoming: list[Game] | None = None) ->
     best = None
     for k in K_GRID[league]:
         for hfa in HFA_GRID:
-            X = features(games, k, hfa, form_n, mov_norm)
+            X = features(games, k, hfa, form_n, mov_norm, CARRY.get(league, 0.75))
             ll = log_loss(1 / (1 + 10 ** (-X[train][warm:, 0])), y[train][warm:])
             if best is None or ll < best[0]:
                 best = (ll, k, hfa, X)
