@@ -153,6 +153,23 @@ python jarvis_kalshi.py --order proposals/kalshi/X.json --live   # orden real
 - `KALSHI_ENV=demo` usa el entorno de prueba de Kalshi (dinero ficticio). Pasa a `prod` solo después.
 - Firma y formato verificados contra el SDK oficial `kalshi_python_sync` 3.36.
 
+## Analizador de temperatura (`weather/`)
+
+Compara el pronóstico oficial del NWS (National Blend of Models, archivado por la Iowa Environmental
+Mesonet con su hora de emisión) contra los mercados de máxima diaria de Kalshi en 7 ciudades.
+
+```bash
+python -m weather download --from 2025-11-01
+python -m weather evaluate
+```
+
+Resultado fuera de muestra (julio–noviembre 2026, 7 ciudades): el mercado predice mejor.
+
+| Decisión | Días | Log-loss modelo | Log-loss mercado | ROI con ventaja ≥ 5 pts |
+|---|---|---|---|---|
+| Día anterior, 15Z | 769 | 1,50 | 1,21 | −24,8% (−34,2% a −13,9%) |
+| Mismo día, 15Z | 852 | 1,37 | 0,95 | −16,9% (−25,4% a −7,7%) |
+
 ## Límites del ejecutor
 
 Están en `.env` y se aplican en la computadora local, pase lo que pase en la nube:
