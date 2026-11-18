@@ -180,6 +180,7 @@ python jarvis_mm.py --markets TICKER1 TICKER2 --dry-run          # qué cotizar�
 python jarvis_mm.py --markets TICKER1 --size 5 --minutes 30      # opera (demo por defecto)
 python jarvis_mm.py --cancel-all                                 # cancela todo lo abierto
 python jarvis_mm.py --report                                     # llenados, posición y PnL
+python jarvis_mm.py --pick 5 --size 20                           # sugiere mercados con incentivo (API pública)
 ```
 
 - Excluye sus propias órdenes al leer el libro, para no perseguirse a sí mismo.
@@ -187,6 +188,10 @@ python jarvis_mm.py --report                                     # llenados, pos
 - Inventario limitado a ±`max_pos` contratos; deja de comprar o vender al llegar al tope.
 - Si el punto medio salta `jump` (5 centavos por defecto) entre vueltas, cancela y pausa ese mercado.
 - Al terminar, o ante cualquier error, cancela todas sus órdenes. En `prod` exige `--allow-prod`.
+- Seguro ante caídas: cada orden caduca sola a los `--ttl` segundos (300 por defecto) y el bot la
+  renueva antes de que expire. Si la computadora se suspende o pierde internet, no quedan órdenes vivas.
+- `--pick` busca mercados con programa de liquidez activo, cierre cercano y libro fino, y estima tu
+  parte del premio diario para el tamaño elegido.
 
 ## Límites del ejecutor
 

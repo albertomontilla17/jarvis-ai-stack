@@ -62,5 +62,22 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((cancels, places), (["c"], []))
 
 
+class ExpiryTest(unittest.TestCase):
+    def test_order_close_to_expiring_is_replaced(self):
+        own = [{"order_id": "a", "side": "bid", "price": 0.42, "remaining": 5, "expires": 1100}]
+        self.assertEqual(plan(own, {"bid": (0.42, 5), "ask": None}, now=1000, refresh=150), (["a"], [("bid", 0.42, 5)]))
+        self.assertEqual(plan(own, {"bid": (0.42, 5), "ask": None}, now=1000, refresh=60), ([], []))
+
+
+class PickTest(unittest.TestCase):
+    def test_share_and_capital(self):
+        from jarvis_mm import score_market
+        sc = score_market(BOOK, perday=100, disc=0.5, size=10)
+        self.assertEqual((sc["bid"], sc["ask"]), (0.42, 0.45))
+        # Sí: 30 a 0.42 + 10 a 0.40 (·0.25) = 32.5 ; No: 20 a 0.55 + 5 a 0.50 (·0.5^5) ≈ 20.16
+        self.assertAlmostEqual(sc["share"], 10 / (32.5 + 10))
+        self.assertAlmostEqual(sc["capital"], 10 * 0.42 + 10 * 0.55)
+
+
 if __name__ == "__main__":
     unittest.main()

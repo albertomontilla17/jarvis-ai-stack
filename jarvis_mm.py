@@ -51,6 +51,7 @@ class Params:
     cooldown: int = 300        # segundos de pausa tras un salto
     band_lo: float = 0.05
     band_hi: float = 0.95
+    ttl: int = 300             # cada orden caduca sola a los `ttl` s si el bot deja de renovarla
 
 
 # ── Lógica pura (testeable) ───────────────────────────────────────────────────
@@ -97,19 +98,33 @@ def desired_quotes(bid: float | None, ask: float | None, position: float, prm: P
     return {"bid": (qb, buy) if buy > 0 else None, "ask": (qa, sell) if sell > 0 else None}
 
 
-def plan(own: list[dict], desired: dict) -> tuple[list[str], list[tuple]]:
-    """Qué cancelar (order_ids) y qué colocar ((lado, precio, contratos)) para llegar a `desired`."""
+def plan(own: list[dict], desired: dict, now: float | None = None, refresh: float = 0) -> tuple[list[str], list[tuple]]:
+    """
+    Qué cancelar (order_ids) y qué colocar ((lado, precio, contratos)) para llegar a `desired`.
+    Una orden que caduca en menos de `refresh` segundos se reemplaza antes de que expire.
+    """
+    now = now or time.time()
     cancels, places = [], []
     for side in ("bid", "ask"):
         mine = [o for o in own if o["side"] == side]
         want = desired.get(side)
         keep = None
         if want:
-            keep = next((o for o in mine if abs(o["price"] - want[0]) < 1e-9), None)
+            keep = next((o for o in mine if abs(o["price"] - want[0]) < 1e-9
+                         and (o.get("expires") is None or o["expires"] - now > refresh)), None)
         cancels += [o["order_id"] for o in mine if o is not keep]
         if want and keep is None:
             places.append((side, want[0], want[1]))
     return cancels, places
+
+
+def _ts(s) -> int | None:
+    if not s:
+        return None
+    try:
+        return int(dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
 
 
 # ── Conexión con Kalshi ───────────────────────────────────────────────────────
@@ -145,7 +160,8 @@ class Client:
             for o in d.get("orders", []):
                 out.append({"order_id": o["order_id"], "ticker": o["ticker"], "side": o["book_side"],
                             "price": round(float(o["yes_price_dollars"]), 4),
-                            "remaining": float(o["remaining_count_fp"])})
+                            "remaining": float(o["remaining_count_fp"]),
+                            "expires": _ts(o.get("expiration_time"))})
             cursor = d.get("cursor")
             if not cursor or not d.get("orders"):
                 return out
@@ -166,10 +182,12 @@ class Client:
             if not cursor or not d.get("fills"):
                 return out
 
-    def place(self, ticker: str, side: str, price: float, count: int) -> dict:
+    def place(self, ticker: str, side: str, price: float, count: int, ttl: int) -> dict:
         return self._req("POST", kx.ORDER_PATH, body={
             "ticker": ticker, "client_order_id": str(uuid.uuid4()), "side": side,
             "count": str(count), "price": f"{price:.2f}", "time_in_force": "good_till_canceled",
+            # Seguro: si el bot muere (laptop suspendida, sin internet) la orden expira sola.
+            "expiration_time": int(time.time()) + ttl,
             "post_only": True,                          # nunca cruzar: siempre aportar liquidez
             "self_trade_prevention_type": "maker", "cancel_order_on_pause": True})
 
@@ -233,7 +251,7 @@ def run(client: Client, markets: list[str], prm: Params, minutes: float, interva
                     last_mid[t] = mid
                 desired = ({"bid": None, "ask": None} if time.time() < paused_until.get(t, 0)
                            else desired_quotes(bid, ask, position, prm))
-                cancels, places = plan(own, desired)
+                cancels, places = plan(own, desired, refresh=max(prm.ttl / 2, 2 * interval))
                 if dry:
                     log(con, env, t, "SIM", info=f"libro {bid}/{ask} → compra {desired['bid']} venta {desired['ask']}")
                     continue
@@ -242,7 +260,7 @@ def run(client: Client, markets: list[str], prm: Params, minutes: float, interva
                     log(con, env, t, "CANCELA", info=oid[:8])
                 for side, price, count in places:
                     try:
-                        client.place(t, side, price, count)
+                        client.place(t, side, price, count, prm.ttl)
                         log(con, env, t, "COLOCA", side, price, count, f"pos {position:+.0f}")
                     except Rejected as e:
                         log(con, env, t, "RECHAZO", side, price, count, str(e)[:120])
@@ -295,6 +313,73 @@ def report(client: Client, con) -> None:
     print(f"  TOTAL PnL marcado a mercado: ${total:+.2f} (sin contar incentivos, que Kalshi paga aparte)")
 
 
+# ── Selección de mercados con incentivo ───────────────────────────────────────
+def score_market(book: dict, perday: float, disc: float, size: int, ticks: int = 5) -> dict | None:
+    """Parte esperada del premio diario si se cotizan `size` contratos al mejor precio de cada lado."""
+    yes, no = _levels(book.get("yes_dollars")), _levels(book.get("no_dollars"))
+    if not yes or not no:
+        return None
+    by, bn = max(yes), max(no)
+    depth = lambda lv, best: sum(q * disc ** round((best - p) / TICK) for p, q in lv.items()
+                                 if best - p <= ticks * TICK + 1e-9)
+    dy, dn = depth(yes, by), depth(no, bn)
+    share = min(size / (dy + size), size / (dn + size))
+    bid, ask = by, round(1 - bn, 4)
+    capital = size * by + size * bn          # comprar Sí a `bid` y comprar No a 1 − ask
+    return {"bid": bid, "ask": ask, "spread": round(ask - bid, 4), "share": share,
+            "per_day": share * perday, "capital": capital, "depth": (dy, dn)}
+
+
+def pick(n: int, size: int, max_days: float, base: str = kx.BASES["prod"], top: int = 250) -> list[dict]:
+    """Mercados con incentivo de liquidez activo, cierre cercano y libro fino (API pública)."""
+    def get(path, params=None):
+        for i in range(6):
+            r = requests.get(base + path, params=params, timeout=30)
+            if r.status_code == 429:
+                time.sleep(1.5 * (i + 1))
+                continue
+            return r.json() if r.ok else {}
+        return {}
+
+    progs, cursor = [], ""
+    while True:
+        d = get("/incentive_programs", {"status": "active", "type": "liquidity", "limit": 10000,
+                                        **({"cursor": cursor} if cursor else {})})
+        progs += d.get("incentive_programs", [])
+        cursor = d.get("next_cursor")
+        if not cursor or not d.get("incentive_programs"):
+            break
+    now = time.time()
+    for p in progs:
+        span = max((_ts(p["end_date"]) - _ts(p["start_date"])) / 86400, 1)
+        p["perday"] = p["period_reward"] / 10000 / span
+    progs = [p for p in progs if (_ts(p["end_date"]) or 0) - now > 86400]   # que quede al menos 1 día
+    # Mercados abiertos que cierran pronto, en lote (mucho más barato que uno por uno).
+    soon, cursor = {}, ""
+    while True:
+        d = get("/markets", {"status": "open", "limit": 1000, "max_close_ts": int(now + max_days * 86400),
+                             **({"cursor": cursor} if cursor else {})})
+        for m in d.get("markets", []):
+            soon[m["ticker"]] = m
+        cursor = d.get("cursor")
+        if not cursor or not d.get("markets"):
+            break
+    progs = sorted((p for p in progs if p["market_ticker"] in soon), key=lambda p: -p["perday"])
+    out = []
+    for p in progs[:top]:
+        m = soon[p["market_ticker"]]
+        close = _ts(m.get("close_time"))
+        sc = score_market(get(f"/markets/{p['market_ticker']}/orderbook", {"depth": 0}).get("orderbook_fp") or {},
+                          p["perday"], (p.get("discount_factor_bps") or 5000) / 10000, size)
+        time.sleep(0.2)
+        if not sc or not (0.10 <= (sc["bid"] + sc["ask"]) / 2 <= 0.90) or sc["spread"] > 0.05:
+            continue
+        out.append({"ticker": p["market_ticker"], "title": m.get("title", ""), "days": (close - now) / 86400,
+                    "reward_day": p["perday"], **sc})
+    out.sort(key=lambda x: -x["per_day"] / max(x["capital"], 1))
+    return out[:n]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Bot de market making para Kalshi")
     ap.add_argument("--markets", nargs="*", default=[])
@@ -308,8 +393,21 @@ def main():
     ap.add_argument("--allow-prod", action="store_true")
     ap.add_argument("--cancel-all", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--pick", type=int, default=0, help="sugerir N mercados con incentivo (API pública)")
+    ap.add_argument("--max-days", type=float, default=10, help="con --pick: cierre en ≤ N días")
+    ap.add_argument("--ttl", type=int, default=300, help="segundos hasta que una orden caduca sola")
     a = ap.parse_args()
     load_env()
+    if a.pick:
+        picks = pick(a.pick, a.size, a.max_days)
+        print(f"🔎 {len(picks)} mercados sugeridos ({a.size} contratos por lado, cierre ≤ {a.max_days:g} días):")
+        for x in picks:
+            print(f"  {x['ticker']:36s} {x['bid']:.2f}/{x['ask']:.2f}  premio ${x['reward_day']:.0f}/día → "
+                  f"tu parte {x['share']:.1%} ≈ ${x['per_day']:.2f}/día con ${x['capital']:.0f} de capital"
+                  f"  (cierra en {x['days']:.1f} d) {x['title'][:40]}")
+        if picks:
+            print("\npython jarvis_mm.py --markets " + " ".join(x["ticker"] for x in picks))
+        return
     try:
         cfg = kx.config()
         if cfg["env"] == "prod" and not a.allow_prod and not (a.report or a.dry_run):
@@ -322,7 +420,7 @@ def main():
         else:
             if not a.markets:
                 ap.error("indica --markets")
-            run(client, a.markets, Params(a.size, a.max_pos, a.jump, a.cooldown), a.minutes,
+            run(client, a.markets, Params(a.size, a.max_pos, a.jump, a.cooldown, ttl=a.ttl), a.minutes,
                 a.interval, a.dry_run, con)
     except Rejected as e:
         print(f"⛔ {e}")
