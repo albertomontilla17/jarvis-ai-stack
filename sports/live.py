@@ -20,7 +20,7 @@ import datetime as dt
 
 import numpy as np
 
-from . import LEAGUES, data, evaluate, model
+from . import LEAGUES, data, evaluate, model, sharp
 
 LOG_PATH = "sports_log.db"
 OUT_STATUSES = ("out", "injured reserve", "doubtful", "suspension")
@@ -41,9 +41,11 @@ def connect(path: str = LOG_PATH) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
     cols = {r[1] for r in con.execute("PRAGMA table_info(forecasts)")}
-    for col in ("home_ticker", "away_ticker"):   # migración: tickers de Kalshi para ejecutar
+    for col, typ in (("home_ticker", "TEXT"), ("away_ticker", "TEXT"),   # tickers de Kalshi para ejecutar
+                     ("book", "TEXT"), ("book_home_ml", "REAL"), ("book_away_ml", "REAL"),
+                     ("p_book", "REAL")):                                 # línea de la casa (sharp.py)
         if col not in cols:
-            con.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT")
+            con.execute(f"ALTER TABLE forecasts ADD COLUMN {col} {typ}")
     return con
 
 
@@ -121,6 +123,15 @@ def _ticker_for(quotes: dict, team: str, start_ts: int) -> str | None:
     return None
 
 
+def book_line(league: str, gid: str):
+    """Moneyline actual de la casa (ESPN pickcenter) → (casa, ML local, ML visita) o None."""
+    try:
+        s = data._get(f"{data.ESPN}/{LEAGUES[league]['espn']}/summary", {"event": gid.split("-", 1)[1]}, tries=3)
+    except RuntimeError:
+        return None
+    return sharp.parse_pickcenter(s.get("pickcenter"))
+
+
 def snapshot(stats_con, log_con, leagues: list[str], horizon_h: float = 3.0, now: int | None = None) -> list[dict]:
     now = now or int(time.time())
     month = dt.datetime.fromtimestamp(now - 3 * 86400, dt.timezone.utc).strftime("%Y%m")
@@ -150,8 +161,14 @@ def snapshot(stats_con, log_con, leagues: list[str], horizon_h: float = 3.0, now
                  json.dumps(gi, ensure_ascii=False)))
             log_con.execute("UPDATE forecasts SET home_ticker = ?, away_ticker = ? WHERE gid = ?",
                             (_ticker_for(quotes, g.home, g.ts), _ticker_for(quotes, g.away, g.ts), g.gid))
+            line = book_line(lg, g.gid)
+            if line:   # sin cuota se conserva la última registrada
+                book, hml, aml = line
+                log_con.execute("UPDATE forecasts SET book = ?, book_home_ml = ?, book_away_ml = ?, p_book = ?"
+                                " WHERE gid = ?", (book, hml, aml, sharp.fair_home(hml, aml), g.gid))
             rows.append({"gid": g.gid, "league": lg, "start_ts": g.ts, "home": g.home, "away": g.away,
-                         "p_model": probs[g.gid], "home_bid": q[0], "home_ask": q[1], "injuries": gi})
+                         "p_model": probs[g.gid], "home_bid": q[0], "home_ask": q[1], "injuries": gi,
+                         "p_book": sharp.fair_home(*line[1:]) if line else None, "book": line[0] if line else None})
     log_con.commit()
     return rows
 
