@@ -9,6 +9,9 @@ CLI del analizador deportivo.
     python -m sports adjust <gid> 0.62 "motivo"   # probabilidad ajustada del local
     python -m sports results             # mercado vs modelo vs modelo ajustado, en vivo
     python -m sports propose --amount 1  # propuestas de orden para Kalshi (proposals/kalshi/)
+
+    python -m sports sharp-download      # cuota de la casa (ESPN) + precio de Kalshi justo antes del inicio
+    python -m sports sharp-evaluate      # ¿Kalshi se desvía de la casa lo bastante para ganar?
 """
 
 import os
@@ -16,7 +19,7 @@ import argparse
 
 import datetime as dt
 
-from . import LEAGUES, data, evaluate, live, propose
+from . import LEAGUES, data, evaluate, live, propose, sharp
 
 LIVE = ["nba", "nhl", "nfl"]
 
@@ -39,6 +42,19 @@ def cmd_evaluate(a):
     print("✅ edge = el límite inferior del IC 95% es > 0.")
 
 
+def cmd_sharp_download(a):
+    con = sharp.connect(a.db)
+    for lg in a.leagues:
+        print(f"📥 {lg}: cuotas de la casa (ESPN)")
+        sharp.download_odds(con, lg)
+        print(f"📈 {lg}: precio de Kalshi {a.minutes} min antes del inicio")
+        sharp.download_near_quotes(con, lg, a.minutes)
+
+
+def cmd_sharp_evaluate(a):
+    sharp.run(sharp.connect(a.db), a.leagues)
+
+
 def cmd_live(a):
     rows = live.snapshot(data.connect(a.db), live.connect(a.log), a.leagues, a.hours)
     if not rows:
@@ -49,6 +65,8 @@ def cmd_live(a):
         print(f"\n🏟️  {r['gid']}  {r['away']} @ {r['home']}  ({start})")
         print(f"   Local {r['home']}: modelo {r['p_model']:.1%} | Kalshi {r['home_bid']:.2f}/{r['home_ask']:.2f}"
               f" (medio {mid:.1%}) | diferencia {r['p_model'] - mid:+.1%}")
+        if r.get("p_book") is not None:
+            print(f"   Casa ({r['book']}): local {r['p_book']:.1%} sin margen | diferencia con Kalshi {r['p_book'] - mid:+.1%}")
         for team, players in r["injuries"].items():
             names = ", ".join(f"{n} ({pos}, {st})" for n, pos, st in players) or "sin bajas"
             print(f"   Bajas {team}: {names}")
@@ -84,6 +102,11 @@ def main():
     for name, fn in (("download", cmd_download), ("evaluate", cmd_evaluate)):
         s = sub.add_parser(name)
         s.add_argument("--leagues", nargs="*", default=list(LEAGUES), choices=list(LEAGUES))
+        s.set_defaults(fn=fn)
+    for name, fn in (("sharp-download", cmd_sharp_download), ("sharp-evaluate", cmd_sharp_evaluate)):
+        s = sub.add_parser(name)
+        s.add_argument("--leagues", nargs="*", default=LIVE, choices=list(LEAGUES))
+        s.add_argument("--minutes", type=int, default=5, help="minutos antes del inicio para el precio de Kalshi")
         s.set_defaults(fn=fn)
     p.add_argument("--log", default=live.LOG_PATH)
     lv = sub.add_parser("live")

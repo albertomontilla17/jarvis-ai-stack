@@ -10,6 +10,8 @@ Estrategias:
   deportes_modelo      modelo de stats base, si su prob. supera el ask en 5+ puntos (Kalshi)
   deportes_ajustado    modelo ajustado por bajas, mismo umbral (Kalshi)
   deportes_favorito    control: compra siempre al favorito del mercado (Kalshi)
+  deportes_casa        línea de la casa (DraftKings vía ESPN) sin margen, si supera el ask
+                       + comisión en EDGE_BOOK+ puntos (Kalshi) — ver sports/sharp.py
 
 El control mide cuánto cuesta operar sin ninguna ventaja. Una estrategia solo
 vale algo si le gana al control y su intervalo de confianza queda por encima de 0.
@@ -32,10 +34,11 @@ SCAN_DB = os.path.join(HERE, "scan.db")
 BANKROLL = 1000.0        # capital ficticio inicial por estrategia
 STAKE = 20.0             # apuesta fija por operación (2% del capital inicial)
 EDGE = 0.05              # ventaja mínima del modelo sobre el ask
+EDGE_BOOK = 0.03         # ventaja mínima de la línea de la casa sobre el ask + comisión
 KALSHI_FEE = 0.07        # comisión taker: 0.07 × p × (1 − p) por contrato
 PRICE_RANGE = (0.03, 0.97)
 
-STRATEGIES = ("finanzas_reversion", "deportes_modelo", "deportes_ajustado", "deportes_favorito")
+STRATEGIES = ("finanzas_reversion", "deportes_modelo", "deportes_ajustado", "deportes_favorito", "deportes_casa")
 
 
 def connect(path: str = PAPER_DB) -> sqlite3.Connection:
@@ -56,7 +59,7 @@ def kalshi_cost(ask: float) -> float:
 
 
 # ── Decisiones deportivas ─────────────────────────────────────────────────────
-def sports_pick(strategy: str, p_model, p_adj, home_bid: float, home_ask: float):
+def sports_pick(strategy: str, p_model, p_adj, home_bid: float, home_ask: float, p_book=None):
     """Devuelve (lado, ask, prob) o None. Lado = 'home' | 'away'."""
     sides = {"home": home_ask, "away": 1 - home_bid}
     if strategy == "deportes_favorito":
@@ -64,14 +67,15 @@ def sports_pick(strategy: str, p_model, p_adj, home_bid: float, home_ask: float)
         side = "home" if mid >= 0.5 else "away"
         ask = sides[side]
         return (side, ask, None) if PRICE_RANGE[0] <= ask <= PRICE_RANGE[1] else None
-    p = p_model if strategy == "deportes_modelo" else p_adj
+    p = {"deportes_modelo": p_model, "deportes_ajustado": p_adj, "deportes_casa": p_book}[strategy]
     if p is None:
         return None
+    need = EDGE_BOOK if strategy == "deportes_casa" else EDGE
     best = None
     for side, prob in (("home", p), ("away", 1 - p)):
         ask = sides[side]
         edge = prob - kalshi_cost(ask)
-        if edge >= EDGE and PRICE_RANGE[0] <= ask <= PRICE_RANGE[1] and (best is None or edge > best[0]):
+        if edge >= need and PRICE_RANGE[0] <= ask <= PRICE_RANGE[1] and (best is None or edge > best[0]):
             best = (edge, side, ask, prob)
     return best[1:] if best else None
 
@@ -80,13 +84,14 @@ def sync_sports(con, now: int) -> None:
     if not os.path.exists(SPORTS_LOG):
         return
     log = sqlite3.connect(SPORTS_LOG)
+    has_book = "p_book" in {r[1] for r in log.execute("PRAGMA table_info(forecasts)")}
     rows = log.execute("SELECT gid, league, start_ts, home, away, p_model, p_adj, home_bid, home_ask,"
-                       " home_won FROM forecasts").fetchall()
-    for gid, league, start, home, away, p_model, p_adj, bid, ask, home_won in rows:
+                       f" home_won, {'p_book' if has_book else 'NULL'} FROM forecasts").fetchall()
+    for gid, league, start, home, away, p_model, p_adj, bid, ask, home_won, p_book in rows:
         for strat in STRATEGIES[1:]:
             tid = f"{strat}|{gid}"
             if start > now:   # antes del partido la decisión se rehace con el último precio
-                pick = sports_pick(strat, p_model, p_adj, bid, ask)
+                pick = sports_pick(strat, p_model, p_adj, bid, ask, p_book)
                 if pick is None:
                     con.execute("DELETE FROM trades WHERE id = ?", (tid,))
                     continue

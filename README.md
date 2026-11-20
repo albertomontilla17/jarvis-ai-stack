@@ -115,6 +115,34 @@ Cada corrida guarda en `sports_log.db` el pronóstico previo a cada partido de N
 Los ajustes solo se aceptan antes del inicio. Criterio para pasar a dinero real: 200+ partidos
 terminados en los que el modelo ajustado tenga menor log-loss que el mercado y ROI con IC > 0.
 
+## Kalshi contra la línea de la casa (`sports/sharp.py`)
+
+En vez de un modelo propio, usa la cuota moneyline de una casa grande (DraftKings, vía el resumen
+de partido de ESPN, sin API key) sin su margen como probabilidad justa, y compra en Kalshi si
+el ask + comisión queda por debajo.
+
+```bash
+python -m sports sharp-download     # cuota de la casa + precio de Kalshi 5 min antes del inicio
+python -m sports sharp-evaluate     # ¿Kalshi se desvía lo bastante para ganar?
+```
+
+ESPN solo guarda la línea de cierre, así que se compara con el precio de Kalshi 5 minutos antes del
+inicio (no 30), para no darle a la casa información que Kalshi aún no tenía.
+
+Resultado (diciembre 2025 – noviembre 2026, 2.763 partidos de NBA, NHL y NFL): **sin ventaja**.
+
+| Liga | Partidos | Log-loss casa | Log-loss Kalshi | Diferencia media | Apuestas con ventaja ≥ 1 pt | ROI |
+|---|---|---|---|---|---|---|
+| NBA | 1.217 | 0,5759 | 0,5746 | 0,9 pts | 40 | −63% |
+| NHL | 1.308 | 0,6737 | 0,6730 | 0,7 pts | 3 | −100% |
+| NFL | 238 | 0,6078 | 0,6080 | 1,1 pts | 10 | +23% (IC −54% a +116%) |
+
+Justo antes del partido Kalshi sigue a la casa a menos de un punto, menos que su propio spread, y
+cuando se separa no se equivoca más que ella. Con el precio de Kalshi 60 minutos antes (NBA, prueba
+sesgada a favor de la casa) tampoco hay ventaja significativa. Queda abierta la pregunta de las
+horas previas, que se mide en vivo: el analizador guarda la línea de la casa junto al precio de
+Kalshi en cada corrida, y `paper.py` opera la estrategia `deportes_casa`.
+
 ## Paper trading (`paper.py`)
 
 Convierte los registros de los escáneres en operaciones simuladas al precio real de compra
@@ -126,6 +154,7 @@ Convierte los registros de los escáneres en operaciones simuladas al precio rea
 | `deportes_modelo` | modelo base, si su prob. supera el ask + comisión en 5+ puntos (Kalshi) |
 | `deportes_ajustado` | modelo ajustado por bajas, mismo umbral (Kalshi) |
 | `deportes_favorito` | control: siempre el favorito del mercado; mide el costo de operar sin ventaja |
+| `deportes_casa` | línea de la casa sin margen, si supera el ask + comisión en 3+ puntos (Kalshi) |
 
 ```bash
 python paper.py     # sincroniza operaciones y muestra PnL, ROI con IC 95% y caída máxima

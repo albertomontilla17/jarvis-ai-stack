@@ -87,8 +87,8 @@ def parse_event(league: str, e: dict) -> dict | None:
     """Un partido de ESPN → dict con local, visita, neutral y marcador (None si no sirve)."""
     c = e["competitions"][0]
     side = {t["homeAway"]: t for t in c["competitors"]}
-    if set(side) != {"home", "away"}:
-        return None
+    if set(side) != {"home", "away"} or not all(t["team"].get("abbreviation") for t in side.values()):
+        return None   # p. ej. cruces de playoff con rival aún por definir
     teams = [(t["team"]["abbreviation"], t["team"].get("location", ""), t["team"].get("name", ""),
               t["team"].get("shortDisplayName", "")) for t in side.values()]
     out = {"gid": f"{league}-{e['id']}", "ts": _ts(e["date"]), "season": int(e["season"]["year"]),
