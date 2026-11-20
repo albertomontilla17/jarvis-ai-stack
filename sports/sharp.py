@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS kalshi_near (
 # ESPN empezó a publicar la línea de DraftKings de forma consistente en diciembre de 2025.
 FIRST_TS = 1764547200   # 2025-12-01 00:00 UTC
 THRESHOLDS = (0.01, 0.02, 0.03, 0.05, 0.08)
+MIN_BETS = 30          # con menos apuestas el IC no significa nada
 
 
 def connect(path: str = data.DB_PATH) -> sqlite3.Connection:
@@ -186,7 +187,7 @@ def report(label: str, rows: list[evaluate.Row]) -> dict:
         r = bets(rows, thr)
         roi, lo, hi = evaluate.ci(r)
         h1, h2 = bets(rows[:half], thr), bets(rows[half:], thr)
-        flag = "✅ edge" if len(r) and lo > 0 else ""
+        flag = "✅ edge" if len(r) >= MIN_BETS and lo > 0 else ("(muy pocas)" if len(r) < MIN_BETS else "")
         print(f"   {thr:7.2f} {len(r):9d} {roi:+8.2%}  [{lo:+7.2%}, {hi:+7.2%}]   "
               f"{(h1.mean() if len(h1) else 0):+7.2%} ({len(h1)})  {(h2.mean() if len(h2) else 0):+7.2%} ({len(h2)})  {flag}")
         res[thr] = (len(r), roi, lo, hi)
